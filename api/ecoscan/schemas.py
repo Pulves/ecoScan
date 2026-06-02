@@ -1,0 +1,45 @@
+from pydantic import BaseModel, Field, ConfigDict, EmailStr
+from uuid import UUID
+
+class Message(BaseModel):
+    message: str
+
+class UserSchema(BaseModel):
+    email: EmailStr = Field(max_length=254)
+    name: str = Field(max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+
+
+
+class UserResponseSchema(BaseModel):
+    id: UUID
+    email: EmailStr
+    name: str
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TokenSchema(BaseModel):
+    access_token: str
+    token_type: str
+
+
+class UserUpdateSchema(BaseModel):
+    email: EmailStr = Field(max_length=254)
+    name: str = Field(max_length=255)
+
+class passwordResetRequestSchema(BaseModel):
+    email: EmailStr = Field(max_length=254)
+
+
+class passwordResetSchema(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+class UserLoginSchema(BaseModel):
+    email: EmailStr = Field(max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+
+class PatchUserSchema(BaseModel):
+    email: EmailStr | None = Field(default=None, max_length=254)
+    name: str | None = Field(default=None, max_length=255)
+    
