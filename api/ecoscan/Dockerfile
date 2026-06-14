@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.12-slim
 
 # Define o diretório de trabalho dentro do container
 WORKDIR /ecoscan
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copia o arquivo de dependências primeiro (otimiza o cache de camadas do Docker)
-COPY ./../requirements.txt /ecoscan/requirements.txt
+COPY requirements.txt /ecoscan/requirements.txt
 
 # Instala as dependências do Python
 RUN pip install --no-cache-dir --upgrade -r /ecoscan/requirements.txt
