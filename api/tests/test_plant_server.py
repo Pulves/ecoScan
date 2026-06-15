@@ -36,7 +36,9 @@ class PlantServerTests(TestCase):
             model=FakeModel(),
             metadata={"display_names_pt_br": {"banana": "Bananeira"}},
         )
-        self.client_context = TestClient(create_app(classifier))
+        self.client_context = TestClient(
+            create_app(classifier, initialize_database=False)
+        )
         self.client = self.client_context.__enter__()
 
     def tearDown(self) -> None:
@@ -67,3 +69,38 @@ class PlantServerTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["model_loaded"])
+
+    def test_exposes_unified_service_information(self) -> None:
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["service"], "EcoScan API")
+        self.assertEqual(response.json()["users"], "/users/")
+
+
+class PlantServerWithoutModelTests(TestCase):
+    def test_starts_service_and_reports_missing_model(self) -> None:
+        classifier = PlantClassifier(
+            Path("missing-best.pt"),
+            metadata={},
+        )
+
+        with TestClient(
+            create_app(classifier, initialize_database=False)
+        ) as client:
+            health_response = client.get("/plants/health")
+            identify_response = client.post(
+                "/plants/identify",
+                files={
+                    "image": (
+                        "plant.png",
+                        create_png_image(),
+                        "image/png",
+                    )
+                },
+            )
+
+        self.assertEqual(health_response.status_code, 200)
+        self.assertFalse(health_response.json()["model_loaded"])
+        self.assertEqual(health_response.json()["status"], "unavailable")
+        self.assertEqual(identify_response.status_code, 503)

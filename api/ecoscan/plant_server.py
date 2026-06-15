@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -8,29 +9,59 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from ecoscan.database import close_database, create_database_schema
 from ecoscan.plant_classifier import PlantClassifier
+from ecoscan.routes import auth, user
 from ecoscan.routes.plants import router as plants_router
 
 
 logger = logging.getLogger(__name__)
 
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-def create_app(classifier: PlantClassifier | None = None) -> FastAPI:
+
+def event_loop_factory() -> asyncio.AbstractEventLoop:
+    if os.name == "nt":
+        return asyncio.SelectorEventLoop()
+    return asyncio.new_event_loop()
+
+
+def create_app(
+    classifier: PlantClassifier | None = None,
+    *,
+    initialize_database: bool = True,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if initialize_database:
+            await create_database_schema()
+            logger.info("Schema do banco de dados pronto.")
+
         service = classifier or PlantClassifier.from_environment()
-        logger.info("Carregando modelo em %s", service.model_path)
-        service.load()
         app.state.plant_classifier = service
-        logger.info("Modelo carregado; API pronta para receber imagens.")
-        yield
+        app.state.plant_classifier_error = None
+
+        try:
+            logger.info("Carregando modelo em %s", service.model_path)
+            service.load()
+            logger.info("Modelo carregado; API pronta para receber imagens.")
+        except (FileNotFoundError, RuntimeError) as exc:
+            app.state.plant_classifier_error = str(exc)
+            logger.warning("Classificador indisponivel: %s", exc)
+
+        try:
+            yield
+        finally:
+            if initialize_database:
+                await close_database()
 
     app = FastAPI(
-        title="EcoScan Plant Recognition API",
+        title="EcoScan API",
         version="1.0.0",
         description=(
-            "API local para classificar imagens de plantas com o modelo "
-            "YOLO11 treinado no arquivo best.pt."
+            "API unificada para usuarios, autenticacao e classificacao "
+            "de plantas com YOLO11."
         ),
         lifespan=lifespan,
     )
@@ -38,15 +69,20 @@ def create_app(classifier: PlantClassifier | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=["*"],
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(user.router)
+    app.include_router(auth.router)
     app.include_router(plants_router)
 
     @app.get("/", tags=["service"])
-    async def root() -> dict[str, str]:
+    async def root() -> dict[str, object]:
         return {
-            "service": "EcoScan Plant Recognition API",
+            "service": "EcoScan API",
+            "status": "ready",
+            "users": "/users/",
+            "authentication": "/auth/token",
             "health": "/plants/health",
             "identify": "/plants/identify",
             "documentation": "/docs",
@@ -65,4 +101,5 @@ if __name__ == "__main__":
         app,
         host=os.getenv("ECOSCAN_HOST", "0.0.0.0"),
         port=int(os.getenv("ECOSCAN_PORT", "8000")),
+        loop=event_loop_factory,
     )

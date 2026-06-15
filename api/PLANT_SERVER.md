@@ -34,11 +34,29 @@ Dentro da pasta `api`:
 python -m ecoscan.plant_server
 ```
 
+O comando inicia a API unificada de usuarios, autenticacao e reconhecimento.
 O servidor escuta em todas as interfaces na porta `8000`:
 
 - Documentacao interativa: `http://localhost:8000/docs`
+- Cadastro de usuario: `POST http://localhost:8000/users/`
+- Autenticacao: `POST http://localhost:8000/auth/token`
 - Saude do modelo: `GET http://localhost:8000/plants/health`
 - Reconhecimento: `POST http://localhost:8000/plants/identify`
+
+Sem o arquivo `best.pt`, os recursos de usuario e autenticacao continuam
+funcionando e o reconhecimento responde com HTTP `503`.
+
+## Docker
+
+Crie `api/.env` a partir de `api/.env.example` e execute:
+
+```powershell
+cd api
+docker compose up -d --build
+docker compose ps
+```
+
+O Postgres fica disponivel na porta `5432` e a API na porta `8000`.
 
 Teste pelo PowerShell:
 

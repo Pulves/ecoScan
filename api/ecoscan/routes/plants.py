@@ -53,6 +53,7 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     model_file: str
     device: str
+    detail: str | None = None
 
 
 def get_classifier(request: Request) -> PlantClassifier:
@@ -69,12 +70,16 @@ ClassifierDependency = Annotated[PlantClassifier, Depends(get_classifier)]
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health(classifier: ClassifierDependency) -> dict[str, object]:
+async def health(
+    request: Request,
+    classifier: ClassifierDependency,
+) -> dict[str, object]:
     return {
-        "status": "ready" if classifier.ready else "starting",
+        "status": "ready" if classifier.ready else "unavailable",
         "model_loaded": classifier.ready,
         "model_file": classifier.model_path.name,
         "device": classifier.device,
+        "detail": getattr(request.app.state, "plant_classifier_error", None),
     }
 
 
@@ -94,6 +99,12 @@ async def identify_plant(
         Query(ge=1, le=10, description="Quantidade de alternativas."),
     ] = 3,
 ) -> dict[str, object]:
+    if not classifier.ready:
+        raise HTTPException(
+            status_code=503,
+            detail="O modelo best.pt ainda nao foi disponibilizado.",
+        )
+
     content_type = (image.content_type or "").lower()
     if content_type and content_type not in ALLOWED_CONTENT_TYPES:
         await image.close()
