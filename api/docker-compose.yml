@@ -32,6 +32,16 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgresPassword@db:5432/ecoscan
       ECOSCAN_MODEL_PATH: /app/ecoscan/best.pt
+      ECOSCAN_METADATA_PATH: /app/ecoscan/model_metadata.json
+    volumes:
+      - type: bind
+        source: ${ECOSCAN_MODEL_HOST_PATH}
+        target: /app/ecoscan/best.pt
+        read_only: true
+      - type: bind
+        source: ./ecoscan/model_metadata.json
+        target: /app/ecoscan/model_metadata.json
+        read_only: true
     depends_on:
       db:
         condition: service_healthy
@@ -41,7 +51,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/')",
+          "import json, urllib.request; data=json.load(urllib.request.urlopen('http://localhost:8000/plants/health')); assert data['model_loaded']",
         ]
       interval: 10s
       timeout: 5s

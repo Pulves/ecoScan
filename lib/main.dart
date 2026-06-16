@@ -1,13 +1,188 @@
-import 'dart:math' as math;
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const EcoScanApp());
 }
 
+typedef CameraLoader = Future<List<CameraDescription>> Function();
+typedef PlantIdentifier =
+    Future<PlantIdentification> Function(Uint8List imageBytes);
+
+const _apiBaseUrl = String.fromEnvironment(
+  'ECOSCAN_API_BASE_URL',
+  defaultValue: 'http://10.0.2.2:8000',
+);
+
+class CapturedPlantResult {
+  const CapturedPlantResult({
+    required this.imageBytes,
+    required this.identification,
+  });
+
+  final Uint8List imageBytes;
+  final PlantIdentification identification;
+}
+
+class PlantIdentification {
+  const PlantIdentification({
+    required this.success,
+    required this.recognized,
+    required this.plant,
+    required this.alternatives,
+    required this.threshold,
+  });
+
+  factory PlantIdentification.fromJson(Map<String, dynamic> json) {
+    final plantJson = json['plant'];
+    final alternativesJson = json['alternatives'];
+    return PlantIdentification(
+      success: json['success'] == true,
+      recognized: json['recognized'] == true,
+      plant: plantJson is Map<String, dynamic>
+          ? PlantPrediction.fromJson(plantJson)
+          : null,
+      alternatives: alternativesJson is List
+          ? alternativesJson
+                .whereType<Map<String, dynamic>>()
+                .map(PlantPrediction.fromJson)
+                .toList()
+          : const [],
+      threshold: (json['threshold'] as num?)?.toDouble() ?? 0,
+    );
+  }
+
+  final bool success;
+  final bool recognized;
+  final PlantPrediction? plant;
+  final List<PlantPrediction> alternatives;
+  final double threshold;
+}
+
+class PlantPrediction {
+  const PlantPrediction({
+    required this.classId,
+    required this.slug,
+    required this.name,
+    required this.confidence,
+  });
+
+  factory PlantPrediction.fromJson(Map<String, dynamic> json) {
+    return PlantPrediction(
+      classId: (json['class_id'] as num?)?.toInt() ?? -1,
+      slug: json['slug']?.toString() ?? '',
+      name: json['name']?.toString() ?? 'Planta',
+      confidence: (json['confidence'] as num?)?.toDouble() ?? 0,
+    );
+  }
+
+  final int classId;
+  final String slug;
+  final String name;
+  final double confidence;
+
+  String get confidenceLabel => '${(confidence * 100).toStringAsFixed(0)}%';
+}
+
+class PlantIdentificationException implements Exception {
+  const PlantIdentificationException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class EcoScanApiClient {
+  const EcoScanApiClient({
+    this.baseUrl = _apiBaseUrl,
+    this.client,
+    this.timeout = const Duration(seconds: 30),
+  });
+
+  final String baseUrl;
+  final http.Client? client;
+  final Duration timeout;
+
+  Future<PlantIdentification> identifyPlant(Uint8List imageBytes) async {
+    final normalizedBaseUrl = baseUrl.endsWith('/')
+        ? baseUrl.substring(0, baseUrl.length - 1)
+        : baseUrl;
+    final uri = Uri.parse(
+      '$normalizedBaseUrl/plants/identify',
+    ).replace(queryParameters: {'confidence_threshold': '0.60', 'top_k': '3'});
+    final request = http.MultipartRequest('POST', uri)
+      ..files.add(
+        http.MultipartFile.fromBytes(
+          'image',
+          imageBytes,
+          filename: 'plant.jpg',
+        ),
+      );
+    final activeClient = client ?? http.Client();
+
+    try {
+      final streamedResponse = await activeClient
+          .send(request)
+          .timeout(timeout);
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode != 200) {
+        throw PlantIdentificationException(_errorMessageFrom(response));
+      }
+
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map<String, dynamic>) {
+        throw const PlantIdentificationException(
+          'Resposta inesperada da API de identificacao.',
+        );
+      }
+      return PlantIdentification.fromJson(decoded);
+    } on TimeoutException {
+      throw const PlantIdentificationException(
+        'Tempo esgotado ao chamar a API de identificacao.',
+      );
+    } on http.ClientException catch (error) {
+      throw PlantIdentificationException(
+        'Nao foi possivel conectar a API: ${error.message}',
+      );
+    } on FormatException {
+      throw const PlantIdentificationException(
+        'A API retornou uma resposta invalida.',
+      );
+    } finally {
+      if (client == null) {
+        activeClient.close();
+      }
+    }
+  }
+
+  String _errorMessageFrom(http.Response response) {
+    try {
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is Map<String, dynamic>) {
+        final detail = decoded['detail'];
+        if (detail != null) {
+          return detail.toString();
+        }
+      }
+    } on FormatException {
+      // Fall through to the generic status message below.
+    }
+    return 'Falha na identificacao (HTTP ${response.statusCode}).';
+  }
+}
+
 class EcoScanApp extends StatelessWidget {
-  const EcoScanApp({super.key});
+  const EcoScanApp({super.key, this.cameraLoader, this.plantIdentifier});
+
+  final CameraLoader? cameraLoader;
+  final PlantIdentifier? plantIdentifier;
 
   @override
   Widget build(BuildContext context) {
@@ -24,7 +199,10 @@ class EcoScanApp extends StatelessWidget {
         fontFamily: 'Serif',
         useMaterial3: true,
       ),
-      home: const LoginScreen(),
+      home: LoginScreen(
+        cameraLoader: cameraLoader,
+        plantIdentifier: plantIdentifier,
+      ),
     );
   }
 }
@@ -45,6 +223,7 @@ class PlantEntry {
     required this.subtitle,
     required this.palette,
     required this.icon,
+    this.imageBytes,
   });
 
   final String name;
@@ -52,6 +231,7 @@ class PlantEntry {
   final String subtitle;
   final List<Color> palette;
   final IconData icon;
+  final Uint8List? imageBytes;
 }
 
 const List<PlantEntry> samplePlants = [
@@ -79,7 +259,10 @@ const List<PlantEntry> samplePlants = [
 ];
 
 class LoginScreen extends StatelessWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.cameraLoader, this.plantIdentifier});
+
+  final CameraLoader? cameraLoader;
+  final PlantIdentifier? plantIdentifier;
 
   @override
   Widget build(BuildContext context) {
@@ -104,10 +287,7 @@ class LoginScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 36),
-                  const EcoTextField(
-                    hint: 'Login',
-                    icon: Icons.person_outline,
-                  ),
+                  const EcoTextField(hint: 'Login', icon: Icons.person_outline),
                   const SizedBox(height: 14),
                   const EcoTextField(
                     hint: 'Senha',
@@ -128,7 +308,10 @@ class LoginScreen extends StatelessWidget {
                       onPressed: () {
                         Navigator.of(context).pushReplacement(
                           MaterialPageRoute(
-                            builder: (_) => const EcoHomeShell(),
+                            builder: (_) => EcoHomeShell(
+                              cameraLoader: cameraLoader,
+                              plantIdentifier: plantIdentifier,
+                            ),
                           ),
                         );
                       },
@@ -174,7 +357,10 @@ class EcoTextField extends StatelessWidget {
         prefixIcon: Icon(icon, color: AppColors.moss, size: 20),
         filled: true,
         fillColor: AppColors.card,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 20,
+          vertical: 14,
+        ),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(24),
           borderSide: BorderSide.none,
@@ -185,7 +371,10 @@ class EcoTextField extends StatelessWidget {
 }
 
 class EcoHomeShell extends StatefulWidget {
-  const EcoHomeShell({super.key});
+  const EcoHomeShell({super.key, this.cameraLoader, this.plantIdentifier});
+
+  final CameraLoader? cameraLoader;
+  final PlantIdentifier? plantIdentifier;
 
   @override
   State<EcoHomeShell> createState() => _EcoHomeShellState();
@@ -194,14 +383,47 @@ class EcoHomeShell extends StatefulWidget {
 class _EcoHomeShellState extends State<EcoHomeShell> {
   int _selectedIndex = 1;
   final List<PlantEntry> _libraryPlants = [samplePlants[1]];
-  final List<PlantEntry> _historyPlants = [samplePlants[0], samplePlants[0], samplePlants[1]];
+  final List<PlantEntry> _historyPlants = [
+    samplePlants[0],
+    samplePlants[0],
+    samplePlants[1],
+  ];
 
-  void _addScanResult() {
+  void _addIdentifiedPlant(CapturedPlantResult result) {
+    final identification = result.identification;
+    final prediction = identification.plant;
+    final capturedPlant = PlantEntry(
+      name: identification.recognized && prediction != null
+          ? prediction.name
+          : 'Planta nao reconhecida',
+      date: _formatDate(DateTime.now()),
+      subtitle: _subtitleFor(identification),
+      palette: const [Color(0xFF315B48), Color(0xFF8DBB75), Color(0xFFE1E8D8)],
+      icon: Icons.local_florist,
+      imageBytes: result.imageBytes,
+    );
+
     setState(() {
       _selectedIndex = 1;
-      _historyPlants.insert(0, samplePlants[2]);
-      _libraryPlants.insert(0, samplePlants[2]);
+      _historyPlants.insert(0, capturedPlant);
+      _libraryPlants.insert(0, capturedPlant);
     });
+  }
+
+  String _subtitleFor(PlantIdentification identification) {
+    final prediction = identification.plant;
+    if (identification.recognized && prediction != null) {
+      return 'Confianca ${prediction.confidenceLabel}';
+    }
+
+    final threshold = (identification.threshold * 100).toStringAsFixed(0);
+    return 'Abaixo do limiar de $threshold%';
+  }
+
+  String _formatDate(DateTime date) {
+    final day = date.day.toString().padLeft(2, '0');
+    final month = date.month.toString().padLeft(2, '0');
+    return '$day/$month/${date.year}';
   }
 
   @override
@@ -211,16 +433,16 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
       HistoryScreen(plants: _historyPlants),
       CaptureScreen(
         onBack: () => setState(() => _selectedIndex = 1),
-        onPlantDetected: _addScanResult,
+        onPlantIdentified: _addIdentifiedPlant,
+        cameraLoader: widget.cameraLoader,
+        plantIdentifier: widget.plantIdentifier,
+        isActive: _selectedIndex == 2,
       ),
     ];
 
     return Scaffold(
       body: SafeArea(
-        child: IndexedStack(
-          index: _selectedIndex,
-          children: screens,
-        ),
+        child: IndexedStack(index: _selectedIndex, children: screens),
       ),
       bottomNavigationBar: EcoBottomNav(
         selectedIndex: _selectedIndex,
@@ -407,17 +629,20 @@ class HistoryScreen extends StatelessWidget {
       children: [
         const ScreenHeader(title: 'Historico'),
         Expanded(
-          child: ListView(
+          child: ListView.separated(
             padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
-            children: [
-              const DateLabel('28/04/2026'),
-              PlantCard(plant: plants[0]),
-              const SizedBox(height: 16),
-              PlantCard(plant: plants.length > 1 ? plants[1] : samplePlants[0]),
-              const SizedBox(height: 16),
-              const DateLabel('12/04/2026'),
-              PlantCard(plant: plants.length > 2 ? plants[2] : samplePlants[1]),
-            ],
+            itemCount: plants.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 16),
+            itemBuilder: (context, index) {
+              final plant = plants[index];
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  DateLabel(plant.date),
+                  PlantCard(plant: plant),
+                ],
+              );
+            },
           ),
         ),
       ],
@@ -441,10 +666,7 @@ class LibraryScreen extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(28, 14, 28, 24),
             itemBuilder: (context, index) {
               final plant = plants[index];
-              return PlantCard(
-                plant: plant,
-                showDelete: true,
-              );
+              return PlantCard(plant: plant, showDelete: true);
             },
             separatorBuilder: (_, _) => const SizedBox(height: 14),
             itemCount: plants.length,
@@ -455,15 +677,417 @@ class LibraryScreen extends StatelessWidget {
   }
 }
 
-class CaptureScreen extends StatelessWidget {
+class CaptureScreen extends StatefulWidget {
   const CaptureScreen({
     super.key,
     required this.onBack,
-    required this.onPlantDetected,
+    required this.onPlantIdentified,
+    required this.isActive,
+    this.cameraLoader,
+    this.plantIdentifier,
   });
 
   final VoidCallback onBack;
-  final VoidCallback onPlantDetected;
+  final ValueChanged<CapturedPlantResult> onPlantIdentified;
+  final bool isActive;
+  final CameraLoader? cameraLoader;
+  final PlantIdentifier? plantIdentifier;
+
+  @override
+  State<CaptureScreen> createState() => _CaptureScreenState();
+}
+
+class _CaptureScreenState extends State<CaptureScreen>
+    with WidgetsBindingObserver {
+  CameraController? _controller;
+  bool _isInitializing = false;
+  bool _isTakingPicture = false;
+  bool _isIdentifying = false;
+  String? _cameraError;
+  int _initializationToken = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    if (widget.isActive) {
+      unawaited(_initializeCamera());
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant CaptureScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isActive && widget.isActive) {
+      unawaited(_initializeCamera());
+    } else if (oldWidget.isActive && !widget.isActive) {
+      unawaited(_stopCamera());
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!widget.isActive) {
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive) {
+      unawaited(_stopCamera());
+    } else if (state == AppLifecycleState.resumed) {
+      unawaited(_initializeCamera());
+    }
+  }
+
+  Future<void> _initializeCamera() async {
+    final token = ++_initializationToken;
+    final oldController = _controller;
+    _controller = null;
+    await oldController?.dispose();
+
+    if (!mounted || token != _initializationToken || !widget.isActive) {
+      return;
+    }
+
+    setState(() {
+      _isInitializing = true;
+      _cameraError = null;
+    });
+
+    CameraController? nextController;
+    try {
+      final cameras = await (widget.cameraLoader ?? availableCameras)();
+      if (cameras.isEmpty) {
+        throw CameraException(
+          'NoCameraAvailable',
+          'Nenhuma camera foi encontrada neste dispositivo.',
+        );
+      }
+
+      final selectedCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      nextController = CameraController(
+        selectedCamera,
+        ResolutionPreset.high,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
+      await nextController.initialize();
+
+      if (!mounted || token != _initializationToken || !widget.isActive) {
+        await nextController.dispose();
+        return;
+      }
+
+      setState(() {
+        _controller = nextController;
+        _isInitializing = false;
+      });
+    } on CameraException catch (error) {
+      await nextController?.dispose();
+      _setCameraError(token, _messageForCameraError(error));
+    } catch (_) {
+      await nextController?.dispose();
+      _setCameraError(
+        token,
+        'Nao foi possivel iniciar a camera. Tente novamente.',
+      );
+    }
+  }
+
+  void _setCameraError(int token, String message) {
+    if (!mounted || token != _initializationToken) {
+      return;
+    }
+    setState(() {
+      _isInitializing = false;
+      _cameraError = message;
+    });
+  }
+
+  String _messageForCameraError(CameraException error) {
+    switch (error.code) {
+      case 'CameraAccessDenied':
+        return 'A permissao da camera foi negada. Autorize o acesso e tente novamente.';
+      case 'CameraAccessDeniedWithoutPrompt':
+        return 'A camera esta bloqueada para o EcoScan. Libere o acesso nos ajustes do dispositivo.';
+      case 'CameraAccessRestricted':
+        return 'O acesso a camera esta restrito neste dispositivo.';
+      case 'NoCameraAvailable':
+        return error.description ?? 'Nenhuma camera foi encontrada.';
+      default:
+        return 'Nao foi possivel acessar a camera (${error.code}).';
+    }
+  }
+
+  Future<void> _stopCamera() async {
+    ++_initializationToken;
+    final controller = _controller;
+    _controller = null;
+    await controller?.dispose();
+
+    if (mounted) {
+      setState(() {
+        _isInitializing = false;
+        _isTakingPicture = false;
+        _isIdentifying = false;
+      });
+    }
+  }
+
+  Future<void> _takePicture() async {
+    final controller = _controller;
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        controller.value.isTakingPicture ||
+        _isTakingPicture ||
+        _isIdentifying) {
+      return;
+    }
+
+    setState(() => _isTakingPicture = true);
+    try {
+      final image = await controller.takePicture();
+      final imageBytes = await image.readAsBytes();
+      if (!mounted) {
+        return;
+      }
+
+      final shouldIdentify = await _showCapturedPhoto(imageBytes);
+      if (shouldIdentify && mounted) {
+        await _identifyCapturedPhoto(imageBytes);
+      }
+    } on CameraException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Falha ao capturar a foto (${error.code}).')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isTakingPicture = false);
+      }
+    }
+  }
+
+  Future<void> _identifyCapturedPhoto(Uint8List imageBytes) async {
+    setState(() => _isIdentifying = true);
+    try {
+      final identifier =
+          widget.plantIdentifier ?? const EcoScanApiClient().identifyPlant;
+      final identification = await identifier(imageBytes);
+      if (!mounted) {
+        return;
+      }
+
+      final shouldAddToHistory = await _showIdentificationResult(
+        imageBytes,
+        identification,
+      );
+      if (shouldAddToHistory && mounted) {
+        widget.onPlantIdentified(
+          CapturedPlantResult(
+            imageBytes: imageBytes,
+            identification: identification,
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        await _showIdentificationError(error);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isIdentifying = false);
+      }
+    }
+  }
+
+  Future<bool> _showCapturedPhoto(Uint8List imageBytes) async {
+    return await showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          showDragHandle: true,
+          builder: (context) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Foto capturada',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: AspectRatio(
+                        aspectRatio: 4 / 3,
+                        child: Image.memory(imageBytes, fit: BoxFit.cover),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Revise a imagem antes de envia-la ao modelo.',
+                      style: TextStyle(color: AppColors.muted),
+                    ),
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(context, false),
+                            child: const Text('Tirar outra'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton.icon(
+                            icon: const Icon(Icons.check),
+                            label: const Text('Identificar'),
+                            onPressed: () => Navigator.pop(context, true),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ) ??
+        false;
+  }
+
+  Future<bool> _showIdentificationResult(
+    Uint8List imageBytes,
+    PlantIdentification identification,
+  ) async {
+    final prediction = identification.plant;
+    final recognized = identification.recognized && prediction != null;
+    return await showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          showDragHandle: true,
+          builder: (context) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      recognized ? prediction.name : 'Planta nao reconhecida',
+                      style: const TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: AspectRatio(
+                        aspectRatio: 4 / 3,
+                        child: Image.memory(imageBytes, fit: BoxFit.cover),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      recognized
+                          ? 'Confianca do modelo: ${prediction.confidenceLabel}'
+                          : 'Nenhuma classe atingiu o limiar de '
+                                '${(identification.threshold * 100).toStringAsFixed(0)}%.',
+                      style: const TextStyle(color: AppColors.muted),
+                    ),
+                    if (identification.alternatives.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      const Text(
+                        'Alternativas',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 8),
+                      ...identification.alternatives.take(3).map((plant) {
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text(
+                            '${plant.name} - ${plant.confidenceLabel}',
+                            style: const TextStyle(color: AppColors.muted),
+                          ),
+                        );
+                      }),
+                    ],
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(context, false),
+                            child: const Text('Descartar'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton.icon(
+                            icon: const Icon(Icons.library_add_outlined),
+                            label: const Text('Salvar'),
+                            onPressed: () => Navigator.pop(context, true),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        ) ??
+        false;
+  }
+
+  Future<void> _showIdentificationError(Object error) async {
+    final message = error is PlantIdentificationException
+        ? error.message
+        : 'Nao foi possivel identificar a planta.';
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Falha na identificacao',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Text(message, style: const TextStyle(color: AppColors.muted)),
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Entendi'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -473,7 +1097,7 @@ class CaptureScreen extends StatelessWidget {
         ScreenHeader(
           title: 'Captura',
           showBackButton: true,
-          onBack: onBack,
+          onBack: widget.onBack,
         ),
         Expanded(
           child: Padding(
@@ -486,20 +1110,29 @@ class CaptureScreen extends StatelessWidget {
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        const PlantPreview(),
-                        Container(color: Colors.white.withAlpha(65)),
-                        Positioned.fill(
-                          child: CustomPaint(
-                            painter: FocusFramePainter(),
+                        _buildCameraContent(),
+                        if (_controller?.value.isInitialized ?? false) ...[
+                          Container(color: Colors.white.withAlpha(28)),
+                          Positioned.fill(
+                            child: CustomPaint(painter: FocusFramePainter()),
                           ),
-                        ),
+                        ],
+                        if (_isIdentifying) const IdentificationOverlay(),
                       ],
                     ),
                   ),
                 ),
                 Transform.translate(
                   offset: const Offset(0, -34),
-                  child: CaptureButton(onTap: () => _showDetection(context)),
+                  child: CaptureButton(
+                    isBusy: _isTakingPicture || _isIdentifying,
+                    onTap:
+                        _controller?.value.isInitialized == true &&
+                            !_isTakingPicture &&
+                            !_isIdentifying
+                        ? _takePicture
+                        : null,
+                  ),
                 ),
               ],
             ),
@@ -509,45 +1142,85 @@ class CaptureScreen extends StatelessWidget {
     );
   }
 
-  void _showDetection(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Jiboia identificada',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
+  Widget _buildCameraContent() {
+    final controller = _controller;
+    if (controller != null && controller.value.isInitialized) {
+      final previewSize = controller.value.previewSize;
+      if (previewSize == null) {
+        return CameraPreview(controller);
+      }
+
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final isPortrait = constraints.maxHeight >= constraints.maxWidth;
+          return ClipRect(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: isPortrait ? previewSize.height : previewSize.width,
+                height: isPortrait ? previewSize.width : previewSize.height,
+                child: CameraPreview(controller),
               ),
-              const SizedBox(height: 8),
-              const Text(
-                'Resultado simulado para validar o fluxo de captura. '
-                'Depois, este ponto pode receber o modelo de deteccao '
-                'por camera.',
-                style: TextStyle(color: AppColors.muted),
-              ),
-              const SizedBox(height: 18),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  icon: const Icon(Icons.library_add_outlined),
-                  label: const Text('Adicionar a biblioteca'),
-                  onPressed: () {
-                    Navigator.pop(context);
-                    onPlantDetected();
-                  },
+            ),
+          );
+        },
+      );
+    }
+
+    return ColoredBox(
+      color: const Color(0xFF15271F),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: _isInitializing
+              ? const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(color: Colors.white),
+                    SizedBox(height: 16),
+                    Text(
+                      'Iniciando camera...',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                  ],
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.no_photography_outlined,
+                      color: Colors.white,
+                      size: 42,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      _cameraError ?? 'Camera indisponivel.',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white),
+                      ),
+                      onPressed: _initializeCamera,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Tentar novamente'),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
-        );
-      },
+        ),
+      ),
     );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    ++_initializationToken;
+    unawaited(_controller?.dispose());
+    super.dispose();
   }
 }
 
@@ -569,11 +1242,7 @@ class DateLabel extends StatelessWidget {
 }
 
 class PlantCard extends StatelessWidget {
-  const PlantCard({
-    super.key,
-    required this.plant,
-    this.showDelete = false,
-  });
+  const PlantCard({super.key, required this.plant, this.showDelete = false});
 
   final PlantEntry plant;
   final bool showDelete;
@@ -670,7 +1339,11 @@ class EcoScanLogo extends StatelessWidget {
           Icon(Icons.local_florist, size: size * 0.45, color: Colors.white),
           Positioned(
             top: size * 0.2,
-            child: Icon(Icons.center_focus_strong, size: size * 0.22, color: Colors.white),
+            child: Icon(
+              Icons.center_focus_strong,
+              size: size * 0.22,
+              color: Colors.white,
+            ),
           ),
         ],
       ),
@@ -678,24 +1351,60 @@ class EcoScanLogo extends StatelessWidget {
   }
 }
 
-class CaptureButton extends StatelessWidget {
-  const CaptureButton({super.key, required this.onTap});
+class IdentificationOverlay extends StatelessWidget {
+  const IdentificationOverlay({super.key});
 
-  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: Colors.black.withAlpha(120),
+      child: const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Colors.white),
+            SizedBox(height: 16),
+            Text(
+              'Identificando planta...',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class CaptureButton extends StatelessWidget {
+  const CaptureButton({super.key, required this.onTap, this.isBusy = false});
+
+  final VoidCallback? onTap;
+  final bool isBusy;
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: AppColors.card,
+      color: onTap == null ? const Color(0xFFD6DBD7) : AppColors.card,
       shape: const CircleBorder(),
       elevation: 4,
       child: InkWell(
         customBorder: const CircleBorder(),
         onTap: onTap,
-        child: const SizedBox(
+        child: SizedBox(
           width: 66,
           height: 66,
-          child: Icon(Icons.camera, color: AppColors.forest, size: 34),
+          child: isBusy
+              ? const Padding(
+                  padding: EdgeInsets.all(20),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 3,
+                    color: AppColors.forest,
+                  ),
+                )
+              : const Icon(Icons.camera, color: AppColors.forest, size: 34),
         ),
       ),
     );
@@ -709,21 +1418,22 @@ class PlantThumbnail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final imageBytes = plant.imageBytes;
+    if (imageBytes != null) {
+      return Image.memory(
+        imageBytes,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => _buildPlaceholder(),
+      );
+    }
+
+    return _buildPlaceholder();
+  }
+
+  Widget _buildPlaceholder() {
     return CustomPaint(
       painter: PlantThumbnailPainter(plant.palette),
       child: Icon(plant.icon, color: Colors.white.withAlpha(230), size: 42),
-    );
-  }
-}
-
-class PlantPreview extends StatelessWidget {
-  const PlantPreview({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: CameraPreviewPainter(),
-      child: const SizedBox.expand(),
     );
   }
 }
@@ -760,65 +1470,6 @@ class PlantThumbnailPainter extends CustomPainter {
   bool shouldRepaint(covariant PlantThumbnailPainter oldDelegate) {
     return oldDelegate.palette != palette;
   }
-}
-
-class CameraPreviewPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final sky = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [Color(0xFF9BC7EB), Color(0xFFF3D7B0), Color(0xFFC69E72)],
-      ).createShader(Offset.zero & size);
-    canvas.drawRect(Offset.zero & size, sky);
-
-    final groundPaint = Paint()..color = const Color(0xFFB88458);
-    canvas.drawRect(
-      Rect.fromLTWH(0, size.height * 0.68, size.width, size.height * 0.32),
-      groundPaint,
-    );
-
-    final trunkPaint = Paint()
-      ..color = const Color(0xFF7C5638)
-      ..strokeWidth = size.width * 0.04
-      ..strokeCap = StrokeCap.round;
-    final trunkTop = Offset(size.width * 0.48, size.height * 0.18);
-    final trunkBottom = Offset(size.width * 0.58, size.height * 0.78);
-    canvas.drawLine(trunkBottom, trunkTop, trunkPaint);
-
-    final leafPaint = Paint()..color = const Color(0xFF577B42);
-    for (var i = 0; i < 16; i++) {
-      final angle = i * 0.39;
-      final leafLength = size.width * (0.25 + (i % 3) * 0.03);
-      final end = Offset(
-        trunkTop.dx + leafLength * math.sin(angle),
-        trunkTop.dy + leafLength * math.cos(angle) * 0.62,
-      );
-      canvas.drawLine(
-        trunkTop,
-        end,
-        Paint()
-          ..color = leafPaint.color.withAlpha(220)
-          ..strokeWidth = 8
-          ..strokeCap = StrokeCap.round,
-      );
-    }
-
-    final fencePaint = Paint()
-      ..color = const Color(0xFF7F654B).withAlpha(170)
-      ..strokeWidth = 3;
-    for (var x = size.width * 0.12; x < size.width; x += size.width * 0.19) {
-      canvas.drawLine(
-        Offset(x, size.height * 0.72),
-        Offset(x - 8, size.height * 0.95),
-        fencePaint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class FocusFramePainter extends CustomPainter {

@@ -10,9 +10,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY ecoscan/requirements.txt /app/requirements.txt
 
 RUN pip install --no-cache-dir \
+    --timeout 300 \
+    --retries 10 \
     --index-url https://download.pytorch.org/whl/cpu \
     torch torchvision \
-    && pip install --no-cache-dir --upgrade -r /app/requirements.txt
+    && pip install --no-cache-dir \
+    --timeout 300 \
+    --retries 10 \
+    --index-url https://pypi.org/simple \
+    --upgrade -r /app/requirements.txt
 
 COPY ecoscan /app/ecoscan
 

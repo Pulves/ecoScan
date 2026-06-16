@@ -16,15 +16,15 @@ python -m pip install --upgrade pip
 pip install -r .\ecoscan\requirements.txt
 ```
 
-Copie o modelo treinado para:
+Para executar diretamente com Python, copie o modelo treinado para:
 
 ```text
 api/ecoscan/best.pt
 ```
 
-Opcionalmente, copie `model_metadata.json` para a mesma pasta. Esse arquivo
-permite que a API devolva os nomes amigaveis em portugues e os dados exatos do
-treinamento.
+Como alternativa, defina `ECOSCAN_MODEL_PATH` com o caminho absoluto do peso.
+O arquivo `model_metadata.json` versionado no projeto permite que a API devolva
+os nomes amigaveis em portugues e os dados do treinamento.
 
 ## Executar
 
@@ -48,7 +48,15 @@ funcionando e o reconhecimento responde com HTTP `503`.
 
 ## Docker
 
-Crie `api/.env` a partir de `api/.env.example` e execute:
+Crie `api/.env` a partir de `api/.env.example` e informe o caminho absoluto do
+modelo no computador:
+
+```text
+ECOSCAN_MODEL_HOST_PATH=C:/caminho/para/best.pt
+```
+
+O Compose monta o peso no container em modo somente leitura. Em seguida,
+execute:
 
 ```powershell
 cd api
@@ -57,6 +65,7 @@ docker compose ps
 ```
 
 O Postgres fica disponivel na porta `5432` e a API na porta `8000`.
+O container da API so fica saudavel quando o modelo estiver carregado.
 
 Teste pelo PowerShell:
 
@@ -78,9 +87,9 @@ Exemplo de resposta:
   "success": true,
   "recognized": true,
   "plant": {
-    "class_id": 1,
+    "class_id": 3,
     "slug": "mango",
-    "name": "Manga",
+    "name": "Mangueira",
     "confidence": 0.932114
   },
   "alternatives": [],

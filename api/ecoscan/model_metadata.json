@@ -1,0 +1,32 @@
+{
+  "model_file": "best.pt",
+  "architecture": "yolo11s-cls.pt",
+  "task": "classification",
+  "image_size": 224,
+  "selected_source_classes": [
+    "Coffe-plant",
+    "banana",
+    "coconut",
+    "mango",
+    "tomato"
+  ],
+  "class_names_by_id": {
+    "0": "banana",
+    "1": "coconut",
+    "2": "coffee",
+    "3": "mango",
+    "4": "tomato"
+  },
+  "display_names_pt_br": {
+    "banana": "Bananeira",
+    "coconut": "Coqueiro",
+    "coffee": "Cafe",
+    "mango": "Mangueira",
+    "tomato": "Tomateiro"
+  },
+  "test_metrics": {
+    "top1_accuracy": 0.9175,
+    "top5_accuracy": 1.0
+  },
+  "best_pt_sha256": "d03b0dc16937052131ebb1c391d70aa873e42c11d383bb2d9e6a0bdbe61be847"
+}
