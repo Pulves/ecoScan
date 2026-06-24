@@ -11,12 +11,17 @@ from ecoscan.models import User
 from ecoscan.schemas import TokenSchema
 from ecoscan.database import get_session
 
-from ecoscan.security import create_access_token, verify_password, get_current_user
+from ecoscan.security import (
+    create_access_token,
+    create_refresh_token,
+    get_current_user_from_refresh_token,
+    verify_password,
+)
 
 Oauth2Form = Annotated[OAuth2PasswordRequestForm, Depends()]
 Session = Annotated[AsyncSession, Depends(get_session)]
 
-Current_User = Annotated[User, Depends(get_current_user)]
+Refresh_User = Annotated[User, Depends(get_current_user_from_refresh_token)]
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -32,10 +37,20 @@ async def login(form_data: Oauth2Form, session: Session):
         raise HTTPException(status_code=HTTPStatus.UNAUTHORIZED, detail="Incorrect email or password")
     
     access_token = create_access_token(data={"sub": user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token = create_refresh_token(data={"sub": user.email})
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+    }
 
 
 @router.post("/refresh", response_model=TokenSchema)   
-def refresh_token(current_user: User = Depends(get_current_user)):
+def refresh_token(current_user: Refresh_User):
     access_token = create_access_token(data={"sub": current_user.email})
-    return {"access_token": access_token, "token_type": "bearer"}
+    refresh_token = create_refresh_token(data={"sub": current_user.email})
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+    }

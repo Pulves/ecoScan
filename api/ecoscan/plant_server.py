@@ -13,6 +13,7 @@ from ecoscan.database import close_database, create_database_schema
 from ecoscan.plant_classifier import PlantClassifier
 from ecoscan.routes import auth, user
 from ecoscan.routes.plants import router as plants_router
+from ecoscan.routes.records import history_router, library_router
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,8 @@ def create_app(
     app.include_router(user.router)
     app.include_router(auth.router)
     app.include_router(plants_router)
+    app.include_router(history_router)
+    app.include_router(library_router)
 
     @app.get("/", tags=["service"])
     async def root() -> dict[str, object]:
@@ -85,6 +88,8 @@ def create_app(
             "authentication": "/auth/token",
             "health": "/plants/health",
             "identify": "/plants/identify",
+            "history": "/history",
+            "library": "/library",
             "documentation": "/docs",
         }
 

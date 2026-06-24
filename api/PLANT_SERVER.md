@@ -1,8 +1,9 @@
 # Servidor de reconhecimento de plantas
 
 Este servidor FastAPI recebe uma imagem enviada pelo EcoScan e usa o
-classificador YOLO11 salvo em `best.pt`. A imagem e processada em memoria e
-nao e armazenada no computador.
+classificador YOLO11 salvo em `best.pt`. O reconhecimento e processado em
+memoria; quando o usuario salva o resultado, imagem e metadados sao persistidos
+no PostgreSQL.
 
 ## Preparacao
 
@@ -40,11 +41,20 @@ O servidor escuta em todas as interfaces na porta `8000`:
 - Documentacao interativa: `http://localhost:8000/docs`
 - Cadastro de usuario: `POST http://localhost:8000/users/`
 - Autenticacao: `POST http://localhost:8000/auth/token`
+- Renovacao da sessao: `POST http://localhost:8000/auth/refresh`
 - Saude do modelo: `GET http://localhost:8000/plants/health`
 - Reconhecimento: `POST http://localhost:8000/plants/identify`
+- Salvar/listar historico: `POST/GET http://localhost:8000/history`
+- Remover do historico: `DELETE http://localhost:8000/history/{id}`
+- Listar biblioteca: `GET http://localhost:8000/library`
+- Adicionar/remover da biblioteca: `PUT/DELETE http://localhost:8000/library/{id}`
 
 Sem o arquivo `best.pt`, os recursos de usuario e autenticacao continuam
 funcionando e o reconhecimento responde com HTTP `503`.
+
+A autenticacao retorna um access token de curta duracao e um refresh token.
+O aplicativo armazena ambos com `flutter_secure_storage` e usa
+`/auth/refresh` para renovar a sessao sem exigir um novo login.
 
 ## Docker
 
@@ -102,6 +112,21 @@ Exemplo de resposta:
 }
 ```
 
+## Historico e biblioteca
+
+Os endpoints de persistencia exigem `Authorization: Bearer <token>`. Para
+salvar uma identificacao, envie `multipart/form-data` para `/history` com:
+
+- `image`: arquivo da foto;
+- `plant_name`: nome exibido;
+- `plant_slug`: classe do modelo;
+- `confidence`: confianca entre `0` e `1`;
+- `recognized`: `true` ou `false`;
+- `add_to_library`: adiciona tambem a biblioteca quando `true`.
+
+As listagens retornam apenas registros pertencentes ao usuario autenticado.
+A imagem protegida pode ser recuperada pela URL informada em `image_url`.
+
 ## Chamada no Flutter
 
 Adicione o pacote `http` ao Flutter e envie a foto como multipart com o campo
@@ -133,9 +158,10 @@ Future<Map<String, dynamic>> identifyPlant(
 }
 ```
 
-No emulador Android, use `http://10.0.2.2:8000`. Em um celular fisico, use o
-IP local do computador, por exemplo `http://192.168.0.10:8000`; ambos devem
-estar na mesma rede e a porta `8000` precisa estar liberada no firewall.
+No emulador Android, use `http://10.0.2.2:8000`. Em um celular fisico conectado
+por USB, execute `adb reverse tcp:8000 tcp:8000` e use
+`http://127.0.0.1:8000`. Tambem e possivel usar o IP local do computador quando
+ambos estiverem na mesma rede e a porta `8000` estiver liberada no firewall.
 
 ## Configuracao opcional
 

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from uuid import UUID
 
@@ -20,6 +22,7 @@ class UserResponseSchema(BaseModel):
 
 class TokenSchema(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str
 
 
@@ -42,4 +45,14 @@ class UserLoginSchema(BaseModel):
 class PatchUserSchema(BaseModel):
     email: EmailStr | None = Field(default=None, max_length=254)
     name: str | None = Field(default=None, max_length=255)
-    
+
+
+class IdentificationResponseSchema(BaseModel):
+    id: UUID
+    plant_name: str
+    plant_slug: str | None
+    confidence: float = Field(ge=0, le=1)
+    recognized: bool
+    created_at: datetime
+    in_library: bool
+    image_url: str

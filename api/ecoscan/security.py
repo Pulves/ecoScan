@@ -1,5 +1,6 @@
 from http import HTTPStatus
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from zoneinfo import ZoneInfo
 
@@ -21,13 +22,29 @@ pwn_context = PasswordHash.recommended()
 
 oauth_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", refreshUrl="/auth/refresh")
 
-def create_access_token(data: dict):
+def _create_token(data: dict, *, token_type: str, expires_delta: timedelta):
     to_encode = data.copy()
-    expire = datetime.now(tz=ZoneInfo("UTC")) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    expire = datetime.now(tz=ZoneInfo("UTC")) + expires_delta
+    to_encode.update({"exp": expire, "type": token_type, "jti": str(uuid4())})
     encoded_jwt = encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
     return encoded_jwt
+
+
+def create_access_token(data: dict):
+    return _create_token(
+        data,
+        token_type="access",
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+
+
+def create_refresh_token(data: dict):
+    return _create_token(
+        data,
+        token_type="refresh",
+        expires_delta=timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+    )
 
 def verify_password(plain_password, hashed_password):
     try:
@@ -39,10 +56,12 @@ def get_password_hash(password):
     return pwn_context.hash(password)
 
 
-async def get_current_user(session : AsyncSession = Depends(get_session), 
-                        token: str = Depends(oauth_scheme)):
-    
-
+async def _get_user_from_token(
+    session: AsyncSession,
+    token: str,
+    *,
+    expected_type: str,
+):
     credentials_exception = HTTPException(
         status_code=HTTPStatus.UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -52,7 +71,7 @@ async def get_current_user(session : AsyncSession = Depends(get_session),
     try:
         payload = decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         email_sub: str = payload.get("sub")
-        if email_sub is None:
+        if email_sub is None or payload.get("type") != expected_type:
             raise credentials_exception
     except DecodeError:
         raise credentials_exception
@@ -67,3 +86,25 @@ async def get_current_user(session : AsyncSession = Depends(get_session),
     if current_user is None:
         raise credentials_exception
     return current_user
+
+
+async def get_current_user(
+    session: AsyncSession = Depends(get_session),
+    token: str = Depends(oauth_scheme),
+):
+    return await _get_user_from_token(
+        session,
+        token,
+        expected_type="access",
+    )
+
+
+async def get_current_user_from_refresh_token(
+    session: AsyncSession = Depends(get_session),
+    token: str = Depends(oauth_scheme),
+):
+    return await _get_user_from_token(
+        session,
+        token,
+        expected_type="refresh",
+    )

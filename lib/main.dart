@@ -4,20 +4,67 @@ import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
 void main() {
-  runApp(const EcoScanApp());
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(EcoScanApp());
 }
 
 typedef CameraLoader = Future<List<CameraDescription>> Function();
 typedef PlantIdentifier =
     Future<PlantIdentification> Function(Uint8List imageBytes);
 
-const _apiBaseUrl = String.fromEnvironment(
-  'ECOSCAN_API_BASE_URL',
-  defaultValue: 'http://10.0.2.2:8000',
-);
+const _configuredApiBaseUrl = String.fromEnvironment('ECOSCAN_API_BASE_URL');
+const _defaultApiBaseUrls = ['http://127.0.0.1:8000', 'http://10.0.2.2:8000'];
+
+abstract interface class TokenStorage {
+  Future<String?> readAccessToken();
+
+  Future<String?> readRefreshToken();
+
+  Future<void> writeTokens({
+    required String accessToken,
+    required String refreshToken,
+  });
+
+  Future<void> clear();
+}
+
+class SecureTokenStorage implements TokenStorage {
+  const SecureTokenStorage({this.storage = const FlutterSecureStorage()});
+
+  static const _accessTokenKey = 'ecoscan_access_token';
+  static const _refreshTokenKey = 'ecoscan_refresh_token';
+
+  final FlutterSecureStorage storage;
+
+  @override
+  Future<String?> readAccessToken() => storage.read(key: _accessTokenKey);
+
+  @override
+  Future<String?> readRefreshToken() => storage.read(key: _refreshTokenKey);
+
+  @override
+  Future<void> writeTokens({
+    required String accessToken,
+    required String refreshToken,
+  }) async {
+    await Future.wait([
+      storage.write(key: _accessTokenKey, value: accessToken),
+      storage.write(key: _refreshTokenKey, value: refreshToken),
+    ]);
+  }
+
+  @override
+  Future<void> clear() async {
+    await Future.wait([
+      storage.delete(key: _accessTokenKey),
+      storage.delete(key: _refreshTokenKey),
+    ]);
+  }
+}
 
 class CapturedPlantResult {
   const CapturedPlantResult({
@@ -98,67 +145,411 @@ class PlantIdentificationException implements Exception {
   String toString() => message;
 }
 
-class EcoScanApiClient {
-  const EcoScanApiClient({
-    this.baseUrl = _apiBaseUrl,
-    this.client,
-    this.timeout = const Duration(seconds: 30),
+class PersistedPlantRecord {
+  const PersistedPlantRecord({
+    required this.id,
+    required this.plantName,
+    required this.plantSlug,
+    required this.confidence,
+    required this.recognized,
+    required this.createdAt,
+    required this.inLibrary,
+    required this.imageUrl,
+    this.imageBytes,
   });
 
-  final String baseUrl;
+  factory PersistedPlantRecord.fromJson(Map<String, dynamic> json) {
+    return PersistedPlantRecord(
+      id: json['id']?.toString() ?? '',
+      plantName: json['plant_name']?.toString() ?? 'Planta',
+      plantSlug: json['plant_slug']?.toString(),
+      confidence: (json['confidence'] as num?)?.toDouble() ?? 0,
+      recognized: json['recognized'] == true,
+      createdAt:
+          DateTime.tryParse(json['created_at']?.toString() ?? '') ??
+          DateTime.now(),
+      inLibrary: json['in_library'] == true,
+      imageUrl: json['image_url']?.toString() ?? '',
+    );
+  }
+
+  final String id;
+  final String plantName;
+  final String? plantSlug;
+  final double confidence;
+  final bool recognized;
+  final DateTime createdAt;
+  final bool inLibrary;
+  final String imageUrl;
+  final Uint8List? imageBytes;
+
+  PersistedPlantRecord withImage(Uint8List bytes) {
+    return PersistedPlantRecord(
+      id: id,
+      plantName: plantName,
+      plantSlug: plantSlug,
+      confidence: confidence,
+      recognized: recognized,
+      createdAt: createdAt,
+      inLibrary: inLibrary,
+      imageUrl: imageUrl,
+      imageBytes: bytes,
+    );
+  }
+}
+
+class EcoScanApiClient {
+  EcoScanApiClient({
+    this.baseUrl,
+    this.client,
+    this.timeout = const Duration(seconds: 90),
+    this.accessToken,
+    this.refreshToken,
+    TokenStorage? tokenStorage,
+  }) : tokenStorage = tokenStorage ?? const SecureTokenStorage();
+
+  final String? baseUrl;
   final http.Client? client;
   final Duration timeout;
+  final TokenStorage tokenStorage;
+  String? accessToken;
+  String? refreshToken;
+
+  Future<EcoScanApiClient> login(String email, String password) async {
+    final response = await _sendWithFallback((baseUrl) {
+      return http.Request('POST', Uri.parse('$baseUrl/auth/token'))
+        ..headers['content-type'] = 'application/x-www-form-urlencoded'
+        ..bodyFields = {'username': email, 'password': password};
+    });
+    _ensureSuccess(response, expectedStatus: 200);
+    final decoded = _decodeObject(response);
+    final accessToken = decoded['access_token']?.toString();
+    final refreshToken = decoded['refresh_token']?.toString();
+    if (accessToken == null ||
+        accessToken.isEmpty ||
+        refreshToken == null ||
+        refreshToken.isEmpty) {
+      throw const PlantIdentificationException(
+        'A API nao retornou os tokens da sessao.',
+      );
+    }
+    await _storeTokens(accessToken, refreshToken);
+    return this;
+  }
+
+  Future<bool> restoreSession() async {
+    final accessToken = await tokenStorage.readAccessToken();
+    final refreshToken = await tokenStorage.readRefreshToken();
+    if (accessToken == null ||
+        accessToken.isEmpty ||
+        refreshToken == null ||
+        refreshToken.isEmpty) {
+      return false;
+    }
+
+    this.accessToken = accessToken;
+    this.refreshToken = refreshToken;
+    try {
+      final response = await _sendAuthenticatedWithFallback((baseUrl) {
+        return http.Request('GET', Uri.parse('$baseUrl/users/'));
+      });
+      _ensureSuccess(response, expectedStatus: 200);
+      return true;
+    } on PlantIdentificationException {
+      await logout();
+      return false;
+    }
+  }
+
+  Future<void> logout() async {
+    accessToken = null;
+    refreshToken = null;
+    await tokenStorage.clear();
+  }
+
+  Future<void> register({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    final response = await _sendWithFallback((baseUrl) {
+      return http.Request('POST', Uri.parse('$baseUrl/users/'))
+        ..headers['content-type'] = 'application/json'
+        ..body = jsonEncode({
+          'name': name,
+          'email': email,
+          'password': password,
+        });
+    });
+    _ensureSuccess(response, expectedStatus: 201);
+  }
 
   Future<PlantIdentification> identifyPlant(Uint8List imageBytes) async {
-    final normalizedBaseUrl = baseUrl.endsWith('/')
-        ? baseUrl.substring(0, baseUrl.length - 1)
-        : baseUrl;
-    final uri = Uri.parse(
-      '$normalizedBaseUrl/plants/identify',
-    ).replace(queryParameters: {'confidence_threshold': '0.60', 'top_k': '3'});
-    final request = http.MultipartRequest('POST', uri)
-      ..files.add(
-        http.MultipartFile.fromBytes(
-          'image',
-          imageBytes,
-          filename: 'plant.jpg',
-        ),
-      );
-    final activeClient = client ?? http.Client();
-
     try {
-      final streamedResponse = await activeClient
-          .send(request)
-          .timeout(timeout);
-      final response = await http.Response.fromStream(streamedResponse);
-
-      if (response.statusCode != 200) {
-        throw PlantIdentificationException(_errorMessageFrom(response));
-      }
-
-      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-      if (decoded is! Map<String, dynamic>) {
-        throw const PlantIdentificationException(
-          'Resposta inesperada da API de identificacao.',
-        );
-      }
-      return PlantIdentification.fromJson(decoded);
-    } on TimeoutException {
-      throw const PlantIdentificationException(
-        'Tempo esgotado ao chamar a API de identificacao.',
-      );
-    } on http.ClientException catch (error) {
-      throw PlantIdentificationException(
-        'Nao foi possivel conectar a API: ${error.message}',
-      );
+      final response = await _sendWithFallback((baseUrl) {
+        return http.MultipartRequest(
+            'POST',
+            Uri.parse('$baseUrl/plants/identify').replace(
+              queryParameters: {'confidence_threshold': '0.60', 'top_k': '3'},
+            ),
+          )
+          ..files.add(
+            http.MultipartFile.fromBytes(
+              'image',
+              imageBytes,
+              filename: 'plant.jpg',
+            ),
+          );
+      });
+      _ensureSuccess(response, expectedStatus: 200);
+      return PlantIdentification.fromJson(_decodeObject(response));
     } on FormatException {
       throw const PlantIdentificationException(
         'A API retornou uma resposta invalida.',
       );
+    }
+  }
+
+  Future<PersistedPlantRecord> saveIdentification(
+    CapturedPlantResult result,
+  ) async {
+    _requireAuthentication();
+    final prediction = result.identification.plant;
+    final bestPrediction =
+        prediction ??
+        (result.identification.alternatives.isNotEmpty
+            ? result.identification.alternatives.first
+            : null);
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      return http.MultipartRequest('POST', Uri.parse('$baseUrl/history'))
+        ..fields.addAll({
+          'plant_name': result.identification.recognized && prediction != null
+              ? prediction.name
+              : 'Planta nao reconhecida',
+          'plant_slug': bestPrediction?.slug ?? '',
+          'confidence': (bestPrediction?.confidence ?? 0).toString(),
+          'recognized': result.identification.recognized.toString(),
+          'add_to_library': 'true',
+        })
+        ..files.add(
+          http.MultipartFile.fromBytes(
+            'image',
+            result.imageBytes,
+            filename: 'plant.jpg',
+          ),
+        );
+    });
+    _ensureSuccess(response, expectedStatus: 201);
+    return PersistedPlantRecord.fromJson(
+      _decodeObject(response),
+    ).withImage(result.imageBytes);
+  }
+
+  Future<List<PersistedPlantRecord>> fetchHistory() {
+    return _fetchRecords('/history');
+  }
+
+  Future<List<PersistedPlantRecord>> fetchLibrary() {
+    return _fetchRecords('/library');
+  }
+
+  Future<void> deleteHistory(String identificationId) async {
+    _requireAuthentication();
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      return http.Request(
+        'DELETE',
+        Uri.parse('$baseUrl/history/$identificationId'),
+      );
+    });
+    _ensureSuccess(response, expectedStatus: 204);
+  }
+
+  Future<void> removeFromLibrary(String identificationId) async {
+    _requireAuthentication();
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      return http.Request(
+        'DELETE',
+        Uri.parse('$baseUrl/library/$identificationId'),
+      );
+    });
+    _ensureSuccess(response, expectedStatus: 204);
+  }
+
+  List<String> get _baseUrlCandidates {
+    if (baseUrl case final customBaseUrl?
+        when customBaseUrl.trim().isNotEmpty) {
+      return [customBaseUrl];
+    }
+
+    if (_configuredApiBaseUrl.trim().isNotEmpty) {
+      return [_configuredApiBaseUrl];
+    }
+
+    return _defaultApiBaseUrls;
+  }
+
+  Map<String, String> get _authorizationHeaders {
+    return {'authorization': 'Bearer $accessToken'};
+  }
+
+  Future<List<PersistedPlantRecord>> _fetchRecords(String path) async {
+    _requireAuthentication();
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      return http.Request('GET', Uri.parse('$baseUrl$path'));
+    });
+    _ensureSuccess(response, expectedStatus: 200);
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! List) {
+      throw const PlantIdentificationException(
+        'A API retornou uma lista invalida.',
+      );
+    }
+
+    final records = decoded
+        .whereType<Map<String, dynamic>>()
+        .map(PersistedPlantRecord.fromJson)
+        .toList();
+    return Future.wait(records.map(_loadRecordImage));
+  }
+
+  Future<PersistedPlantRecord> _loadRecordImage(
+    PersistedPlantRecord record,
+  ) async {
+    if (record.imageUrl.isEmpty) {
+      return record;
+    }
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      final imageUri = Uri.parse(record.imageUrl);
+      final uri = imageUri.hasScheme
+          ? imageUri
+          : Uri.parse('$baseUrl${record.imageUrl}');
+      return http.Request('GET', uri);
+    });
+    _ensureSuccess(response, expectedStatus: 200);
+    return record.withImage(response.bodyBytes);
+  }
+
+  Future<http.Response> _sendWithFallback(
+    http.BaseRequest Function(String baseUrl) requestBuilder,
+  ) async {
+    final activeClient = client ?? http.Client();
+    Object? lastNetworkError;
+    try {
+      for (final candidateBaseUrl in _baseUrlCandidates) {
+        final normalizedBaseUrl = candidateBaseUrl.endsWith('/')
+            ? candidateBaseUrl.substring(0, candidateBaseUrl.length - 1)
+            : candidateBaseUrl;
+        try {
+          final request = requestBuilder(normalizedBaseUrl);
+          final streamedResponse = await activeClient
+              .send(request)
+              .timeout(timeout);
+          return await http.Response.fromStream(streamedResponse);
+        } on TimeoutException catch (error) {
+          lastNetworkError = error;
+        } on http.ClientException catch (error) {
+          lastNetworkError = error;
+        }
+      }
     } finally {
       if (client == null) {
         activeClient.close();
       }
+    }
+
+    if (lastNetworkError is TimeoutException) {
+      throw const PlantIdentificationException(
+        'Tempo esgotado ao chamar a API. '
+        'Verifique se o adb reverse tcp:8000 tcp:8000 esta ativo.',
+      );
+    }
+    throw const PlantIdentificationException(
+      'Nao foi possivel conectar a API na porta 8000.',
+    );
+  }
+
+  Future<http.Response> _sendAuthenticatedWithFallback(
+    http.BaseRequest Function(String baseUrl) requestBuilder,
+  ) async {
+    _requireAuthentication();
+
+    Future<http.Response> send() {
+      return _sendWithFallback((baseUrl) {
+        final request = requestBuilder(baseUrl);
+        request.headers.addAll(_authorizationHeaders);
+        return request;
+      });
+    }
+
+    var response = await send();
+    if (response.statusCode != 401) {
+      return response;
+    }
+
+    await _refreshSession();
+    response = await send();
+    return response;
+  }
+
+  Future<void> _refreshSession() async {
+    final currentRefreshToken = refreshToken;
+    if (currentRefreshToken == null || currentRefreshToken.isEmpty) {
+      await logout();
+      throw const PlantIdentificationException('Sessao expirada.');
+    }
+
+    final response = await _sendWithFallback((baseUrl) {
+      return http.Request('POST', Uri.parse('$baseUrl/auth/refresh'))
+        ..headers['authorization'] = 'Bearer $currentRefreshToken';
+    });
+    if (response.statusCode != 200) {
+      await logout();
+      throw const PlantIdentificationException(
+        'Sessao expirada. Entre novamente.',
+      );
+    }
+
+    final decoded = _decodeObject(response);
+    final accessToken = decoded['access_token']?.toString();
+    final nextRefreshToken = decoded['refresh_token']?.toString();
+    if (accessToken == null ||
+        accessToken.isEmpty ||
+        nextRefreshToken == null ||
+        nextRefreshToken.isEmpty) {
+      await logout();
+      throw const PlantIdentificationException(
+        'Nao foi possivel renovar a sessao.',
+      );
+    }
+    await _storeTokens(accessToken, nextRefreshToken);
+  }
+
+  Future<void> _storeTokens(String accessToken, String refreshToken) async {
+    this.accessToken = accessToken;
+    this.refreshToken = refreshToken;
+    await tokenStorage.writeTokens(
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+    );
+  }
+
+  Map<String, dynamic> _decodeObject(http.Response response) {
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException();
+    }
+    return decoded;
+  }
+
+  void _ensureSuccess(http.Response response, {required int expectedStatus}) {
+    if (response.statusCode != expectedStatus) {
+      throw PlantIdentificationException(_errorMessageFrom(response));
+    }
+  }
+
+  void _requireAuthentication() {
+    if (accessToken == null || accessToken!.isEmpty) {
+      throw const PlantIdentificationException('Usuario nao autenticado.');
     }
   }
 
@@ -179,10 +570,16 @@ class EcoScanApiClient {
 }
 
 class EcoScanApp extends StatelessWidget {
-  const EcoScanApp({super.key, this.cameraLoader, this.plantIdentifier});
+  EcoScanApp({
+    super.key,
+    this.cameraLoader,
+    this.plantIdentifier,
+    EcoScanApiClient? apiClient,
+  }) : apiClient = apiClient ?? EcoScanApiClient();
 
   final CameraLoader? cameraLoader;
   final PlantIdentifier? plantIdentifier;
+  final EcoScanApiClient apiClient;
 
   @override
   Widget build(BuildContext context) {
@@ -199,10 +596,69 @@ class EcoScanApp extends StatelessWidget {
         fontFamily: 'Serif',
         useMaterial3: true,
       ),
-      home: LoginScreen(
+      home: SessionBootstrap(
         cameraLoader: cameraLoader,
         plantIdentifier: plantIdentifier,
+        apiClient: apiClient,
       ),
+    );
+  }
+}
+
+class SessionBootstrap extends StatefulWidget {
+  const SessionBootstrap({
+    super.key,
+    required this.apiClient,
+    this.cameraLoader,
+    this.plantIdentifier,
+  });
+
+  final EcoScanApiClient apiClient;
+  final CameraLoader? cameraLoader;
+  final PlantIdentifier? plantIdentifier;
+
+  @override
+  State<SessionBootstrap> createState() => _SessionBootstrapState();
+}
+
+class _SessionBootstrapState extends State<SessionBootstrap> {
+  bool? _hasSession;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_restoreSession());
+  }
+
+  Future<void> _restoreSession() async {
+    var hasSession = false;
+    try {
+      hasSession = await widget.apiClient.restoreSession();
+    } catch (_) {
+      hasSession = false;
+    }
+    if (mounted) {
+      setState(() => _hasSession = hasSession);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasSession = _hasSession;
+    if (hasSession == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (hasSession) {
+      return EcoHomeShell(
+        apiClient: widget.apiClient,
+        cameraLoader: widget.cameraLoader,
+        plantIdentifier: widget.plantIdentifier,
+      );
+    }
+    return LoginScreen(
+      apiClient: widget.apiClient,
+      cameraLoader: widget.cameraLoader,
+      plantIdentifier: widget.plantIdentifier,
     );
   }
 }
@@ -218,6 +674,7 @@ class AppColors {
 
 class PlantEntry {
   const PlantEntry({
+    required this.id,
     required this.name,
     required this.date,
     required this.subtitle,
@@ -226,6 +683,7 @@ class PlantEntry {
     this.imageBytes,
   });
 
+  final String id;
   final String name;
   final String date;
   final String subtitle;
@@ -234,35 +692,157 @@ class PlantEntry {
   final Uint8List? imageBytes;
 }
 
-const List<PlantEntry> samplePlants = [
-  PlantEntry(
-    name: 'Carnauba',
-    date: '28/04/2026',
-    subtitle: 'Palmeira nativa',
-    palette: [Color(0xFF9FC4E4), Color(0xFFD2B27A), Color(0xFF5B7F45)],
-    icon: Icons.park,
-  ),
-  PlantEntry(
-    name: 'Planta',
-    date: '12/04/2026',
-    subtitle: 'Silvestre',
-    palette: [Color(0xFF2F5132), Color(0xFFF1D342), Color(0xFFBA9A65)],
-    icon: Icons.local_florist,
-  ),
-  PlantEntry(
-    name: 'Jiboia',
-    date: '07/04/2026',
-    subtitle: 'Folhagem',
-    palette: [Color(0xFF213C2A), Color(0xFFA6CA63), Color(0xFFE4E7D6)],
-    icon: Icons.spa,
-  ),
-];
-
-class LoginScreen extends StatelessWidget {
-  const LoginScreen({super.key, this.cameraLoader, this.plantIdentifier});
+class LoginScreen extends StatefulWidget {
+  LoginScreen({
+    super.key,
+    this.cameraLoader,
+    this.plantIdentifier,
+    EcoScanApiClient? apiClient,
+  }) : apiClient = apiClient ?? EcoScanApiClient();
 
   final CameraLoader? cameraLoader;
   final PlantIdentifier? plantIdentifier;
+  final EcoScanApiClient apiClient;
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _isLoading = false;
+  String? _errorMessage;
+
+  Future<void> _login() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+    if (email.isEmpty || password.isEmpty) {
+      setState(() => _errorMessage = 'Informe email e senha.');
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final authenticatedClient = await widget.apiClient.login(email, password);
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => EcoHomeShell(
+            cameraLoader: widget.cameraLoader,
+            plantIdentifier: widget.plantIdentifier,
+            apiClient: authenticatedClient,
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = error is PlantIdentificationException
+              ? error.message
+              : 'Nao foi possivel entrar.';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _showRegistration() async {
+    final nameController = TextEditingController();
+    final emailController = TextEditingController(text: _emailController.text);
+    final passwordController = TextEditingController();
+    final shouldRegister = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Criar conta'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(labelText: 'Nome'),
+                ),
+                TextField(
+                  controller: emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(labelText: 'Email'),
+                ),
+                TextField(
+                  controller: passwordController,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Senha (minimo 8 caracteres)',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Criar'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (shouldRegister != true || !mounted) {
+      nameController.dispose();
+      emailController.dispose();
+      passwordController.dispose();
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      await widget.apiClient.register(
+        name: nameController.text.trim(),
+        email: emailController.text.trim(),
+        password: passwordController.text,
+      );
+      _emailController.text = emailController.text.trim();
+      _passwordController.text = passwordController.text;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Conta criada. Entrando...')),
+        );
+      }
+      await _login();
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = error is PlantIdentificationException
+              ? error.message
+              : 'Nao foi possivel criar a conta.';
+        });
+      }
+    } finally {
+      nameController.dispose();
+      emailController.dispose();
+      passwordController.dispose();
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -287,13 +867,28 @@ class LoginScreen extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 36),
-                  const EcoTextField(hint: 'Login', icon: Icons.person_outline),
+                  EcoTextField(
+                    hint: 'Email',
+                    icon: Icons.person_outline,
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
+                  ),
                   const SizedBox(height: 14),
-                  const EcoTextField(
+                  EcoTextField(
                     hint: 'Senha',
                     icon: Icons.lock_outline,
                     obscureText: true,
+                    controller: _passwordController,
+                    onSubmitted: (_) => _login(),
                   ),
+                  if (_errorMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      _errorMessage!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                  ],
                   const SizedBox(height: 22),
                   SizedBox(
                     width: 118,
@@ -305,23 +900,23 @@ class LoginScreen extends StatelessWidget {
                           borderRadius: BorderRadius.circular(24),
                         ),
                       ),
-                      onPressed: () {
-                        Navigator.of(context).pushReplacement(
-                          MaterialPageRoute(
-                            builder: (_) => EcoHomeShell(
-                              cameraLoader: cameraLoader,
-                              plantIdentifier: plantIdentifier,
-                            ),
-                          ),
-                        );
-                      },
-                      child: const Text('Entrar'),
+                      onPressed: _isLoading ? null : _login,
+                      child: _isLoading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text('Entrar'),
                     ),
                   ),
                   TextButton(
-                    onPressed: () {},
+                    onPressed: _isLoading ? null : _showRegistration,
                     child: const Text(
-                      'Esqueci minha senha',
+                      'Criar conta',
                       style: TextStyle(color: AppColors.forest, fontSize: 12),
                     ),
                   ),
@@ -333,6 +928,13 @@ class LoginScreen extends StatelessWidget {
       ),
     );
   }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
 }
 
 class EcoTextField extends StatelessWidget {
@@ -341,16 +943,25 @@ class EcoTextField extends StatelessWidget {
     required this.hint,
     required this.icon,
     this.obscureText = false,
+    this.controller,
+    this.keyboardType,
+    this.onSubmitted,
   });
 
   final String hint;
   final IconData icon;
   final bool obscureText;
+  final TextEditingController? controller;
+  final TextInputType? keyboardType;
+  final ValueChanged<String>? onSubmitted;
 
   @override
   Widget build(BuildContext context) {
     return TextField(
+      controller: controller,
       obscureText: obscureText,
+      keyboardType: keyboardType,
+      onSubmitted: onSubmitted,
       decoration: InputDecoration(
         hintText: hint,
         hintStyle: const TextStyle(color: AppColors.moss),
@@ -371,8 +982,14 @@ class EcoTextField extends StatelessWidget {
 }
 
 class EcoHomeShell extends StatefulWidget {
-  const EcoHomeShell({super.key, this.cameraLoader, this.plantIdentifier});
+  const EcoHomeShell({
+    super.key,
+    required this.apiClient,
+    this.cameraLoader,
+    this.plantIdentifier,
+  });
 
+  final EcoScanApiClient apiClient;
   final CameraLoader? cameraLoader;
   final PlantIdentifier? plantIdentifier;
 
@@ -382,27 +999,60 @@ class EcoHomeShell extends StatefulWidget {
 
 class _EcoHomeShellState extends State<EcoHomeShell> {
   int _selectedIndex = 1;
-  final List<PlantEntry> _libraryPlants = [samplePlants[1]];
-  final List<PlantEntry> _historyPlants = [
-    samplePlants[0],
-    samplePlants[0],
-    samplePlants[1],
-  ];
+  final List<PlantEntry> _libraryPlants = [];
+  final List<PlantEntry> _historyPlants = [];
+  bool _isLoading = true;
+  String? _loadError;
 
-  void _addIdentifiedPlant(CapturedPlantResult result) {
-    final identification = result.identification;
-    final prediction = identification.plant;
-    final capturedPlant = PlantEntry(
-      name: identification.recognized && prediction != null
-          ? prediction.name
-          : 'Planta nao reconhecida',
-      date: _formatDate(DateTime.now()),
-      subtitle: _subtitleFor(identification),
-      palette: const [Color(0xFF315B48), Color(0xFF8DBB75), Color(0xFFE1E8D8)],
-      icon: Icons.local_florist,
-      imageBytes: result.imageBytes,
-    );
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadPersistedPlants());
+  }
 
+  Future<void> _loadPersistedPlants() async {
+    setState(() {
+      _isLoading = true;
+      _loadError = null;
+    });
+    try {
+      final results = await Future.wait([
+        widget.apiClient.fetchHistory(),
+        widget.apiClient.fetchLibrary(),
+      ]);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _historyPlants
+          ..clear()
+          ..addAll(results[0].map(_entryFromRecord));
+        _libraryPlants
+          ..clear()
+          ..addAll(results[1].map(_entryFromRecord));
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _loadError = error is PlantIdentificationException
+              ? error.message
+              : 'Nao foi possivel carregar os dados.';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _addIdentifiedPlant(CapturedPlantResult result) async {
+    final record = await widget.apiClient.saveIdentification(result);
+    final capturedPlant = _entryFromRecord(record);
+
+    if (!mounted) {
+      return;
+    }
     setState(() {
       _selectedIndex = 1;
       _historyPlants.insert(0, capturedPlant);
@@ -410,14 +1060,77 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
     });
   }
 
-  String _subtitleFor(PlantIdentification identification) {
-    final prediction = identification.plant;
-    if (identification.recognized && prediction != null) {
-      return 'Confianca ${prediction.confidenceLabel}';
-    }
+  PlantEntry _entryFromRecord(PersistedPlantRecord record) {
+    return PlantEntry(
+      id: record.id,
+      name: record.plantName,
+      date: _formatDate(record.createdAt.toLocal()),
+      subtitle: record.recognized
+          ? 'Confianca ${(record.confidence * 100).toStringAsFixed(0)}%'
+          : 'Maior confianca ${(record.confidence * 100).toStringAsFixed(0)}%',
+      palette: const [Color(0xFF315B48), Color(0xFF8DBB75), Color(0xFFE1E8D8)],
+      icon: Icons.local_florist,
+      imageBytes: record.imageBytes,
+    );
+  }
 
-    final threshold = (identification.threshold * 100).toStringAsFixed(0);
-    return 'Abaixo do limiar de $threshold%';
+  Future<void> _deleteHistory(PlantEntry plant) async {
+    try {
+      await widget.apiClient.deleteHistory(plant.id);
+      if (mounted) {
+        setState(() {
+          _historyPlants.removeWhere((item) => item.id == plant.id);
+          _libraryPlants.removeWhere((item) => item.id == plant.id);
+        });
+      }
+    } catch (error) {
+      _showDataError(error);
+    }
+  }
+
+  Future<void> _removeFromLibrary(PlantEntry plant) async {
+    try {
+      await widget.apiClient.removeFromLibrary(plant.id);
+      if (mounted) {
+        setState(() {
+          _libraryPlants.removeWhere((item) => item.id == plant.id);
+        });
+      }
+    } catch (error) {
+      _showDataError(error);
+    }
+  }
+
+  void _showDataError(Object error) {
+    if (!mounted) {
+      return;
+    }
+    final message = error is PlantIdentificationException
+        ? error.message
+        : 'Nao foi possivel atualizar os dados.';
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _logout() async {
+    try {
+      await widget.apiClient.logout();
+    } catch (_) {
+      // The in-memory tokens are cleared before secure storage is accessed.
+    }
+    if (!mounted) {
+      return;
+    }
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => LoginScreen(
+          apiClient: widget.apiClient,
+          cameraLoader: widget.cameraLoader,
+          plantIdentifier: widget.plantIdentifier,
+        ),
+      ),
+    );
   }
 
   String _formatDate(DateTime date) {
@@ -429,20 +1142,37 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
   @override
   Widget build(BuildContext context) {
     final screens = [
-      LibraryScreen(plants: _libraryPlants),
-      HistoryScreen(plants: _historyPlants),
+      LibraryScreen(
+        plants: _libraryPlants,
+        onDelete: _removeFromLibrary,
+        onRefresh: _loadPersistedPlants,
+        onLogout: _logout,
+      ),
+      HistoryScreen(
+        plants: _historyPlants,
+        onDelete: _deleteHistory,
+        onRefresh: _loadPersistedPlants,
+        onLogout: _logout,
+      ),
       CaptureScreen(
         onBack: () => setState(() => _selectedIndex = 1),
         onPlantIdentified: _addIdentifiedPlant,
         cameraLoader: widget.cameraLoader,
-        plantIdentifier: widget.plantIdentifier,
+        plantIdentifier:
+            widget.plantIdentifier ?? widget.apiClient.identifyPlant,
         isActive: _selectedIndex == 2,
       ),
     ];
 
     return Scaffold(
       body: SafeArea(
-        child: IndexedStack(index: _selectedIndex, children: screens),
+        child: _isLoading
+            ? const Center(child: CircularProgressIndicator())
+            : _loadError != null &&
+                  _historyPlants.isEmpty &&
+                  _libraryPlants.isEmpty
+            ? DataLoadError(message: _loadError!, onRetry: _loadPersistedPlants)
+            : IndexedStack(index: _selectedIndex, children: screens),
       ),
       bottomNavigationBar: EcoBottomNav(
         selectedIndex: _selectedIndex,
@@ -549,11 +1279,13 @@ class ScreenHeader extends StatelessWidget {
     required this.title,
     this.showBackButton = false,
     this.onBack,
+    this.onLogout,
   });
 
   final String title;
   final bool showBackButton;
   final VoidCallback? onBack;
+  final Future<void> Function()? onLogout;
 
   @override
   Widget build(BuildContext context) {
@@ -592,11 +1324,7 @@ class ScreenHeader extends StatelessWidget {
                 ),
                 IconButton(
                   tooltip: 'Sair',
-                  onPressed: () {
-                    Navigator.of(context).pushReplacement(
-                      MaterialPageRoute(builder: (_) => const LoginScreen()),
-                    );
-                  },
+                  onPressed: onLogout,
                   icon: const Icon(Icons.logout_outlined),
                 ),
               ],
@@ -618,31 +1346,53 @@ class ScreenHeader extends StatelessWidget {
 }
 
 class HistoryScreen extends StatelessWidget {
-  const HistoryScreen({super.key, required this.plants});
+  const HistoryScreen({
+    super.key,
+    required this.plants,
+    required this.onDelete,
+    required this.onRefresh,
+    required this.onLogout,
+  });
 
   final List<PlantEntry> plants;
+  final Future<void> Function(PlantEntry plant) onDelete;
+  final Future<void> Function() onRefresh;
+  final Future<void> Function() onLogout;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const ScreenHeader(title: 'Historico'),
+        ScreenHeader(title: 'Historico', onLogout: onLogout),
         Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
-            itemCount: plants.length,
-            separatorBuilder: (_, _) => const SizedBox(height: 16),
-            itemBuilder: (context, index) {
-              final plant = plants[index];
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  DateLabel(plant.date),
-                  PlantCard(plant: plant),
-                ],
-              );
-            },
+          child: RefreshIndicator(
+            onRefresh: onRefresh,
+            child: plants.isEmpty
+                ? const EmptyDataState(
+                    icon: Icons.history,
+                    message: 'Nenhuma identificacao no historico.',
+                  )
+                : ListView.separated(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(28, 8, 28, 24),
+                    itemCount: plants.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 16),
+                    itemBuilder: (context, index) {
+                      final plant = plants[index];
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          DateLabel(plant.date),
+                          PlantCard(
+                            plant: plant,
+                            showDelete: true,
+                            onDelete: () => onDelete(plant),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
           ),
         ),
       ],
@@ -651,25 +1401,47 @@ class HistoryScreen extends StatelessWidget {
 }
 
 class LibraryScreen extends StatelessWidget {
-  const LibraryScreen({super.key, required this.plants});
+  const LibraryScreen({
+    super.key,
+    required this.plants,
+    required this.onDelete,
+    required this.onRefresh,
+    required this.onLogout,
+  });
 
   final List<PlantEntry> plants;
+  final Future<void> Function(PlantEntry plant) onDelete;
+  final Future<void> Function() onRefresh;
+  final Future<void> Function() onLogout;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const ScreenHeader(title: 'Minha Biblioteca'),
+        ScreenHeader(title: 'Minha Biblioteca', onLogout: onLogout),
         Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(28, 14, 28, 24),
-            itemBuilder: (context, index) {
-              final plant = plants[index];
-              return PlantCard(plant: plant, showDelete: true);
-            },
-            separatorBuilder: (_, _) => const SizedBox(height: 14),
-            itemCount: plants.length,
+          child: RefreshIndicator(
+            onRefresh: onRefresh,
+            child: plants.isEmpty
+                ? const EmptyDataState(
+                    icon: Icons.menu_book_outlined,
+                    message: 'Sua biblioteca ainda esta vazia.',
+                  )
+                : ListView.separated(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(28, 14, 28, 24),
+                    itemBuilder: (context, index) {
+                      final plant = plants[index];
+                      return PlantCard(
+                        plant: plant,
+                        showDelete: true,
+                        onDelete: () => onDelete(plant),
+                      );
+                    },
+                    separatorBuilder: (_, _) => const SizedBox(height: 14),
+                    itemCount: plants.length,
+                  ),
           ),
         ),
       ],
@@ -688,7 +1460,7 @@ class CaptureScreen extends StatefulWidget {
   });
 
   final VoidCallback onBack;
-  final ValueChanged<CapturedPlantResult> onPlantIdentified;
+  final Future<void> Function(CapturedPlantResult result) onPlantIdentified;
   final bool isActive;
   final CameraLoader? cameraLoader;
   final PlantIdentifier? plantIdentifier;
@@ -875,7 +1647,7 @@ class _CaptureScreenState extends State<CaptureScreen>
     setState(() => _isIdentifying = true);
     try {
       final identifier =
-          widget.plantIdentifier ?? const EcoScanApiClient().identifyPlant;
+          widget.plantIdentifier ?? EcoScanApiClient().identifyPlant;
       final identification = await identifier(imageBytes);
       if (!mounted) {
         return;
@@ -886,7 +1658,7 @@ class _CaptureScreenState extends State<CaptureScreen>
         identification,
       );
       if (shouldAddToHistory && mounted) {
-        widget.onPlantIdentified(
+        await widget.onPlantIdentified(
           CapturedPlantResult(
             imageBytes: imageBytes,
             identification: identification,
@@ -1241,11 +2013,105 @@ class DateLabel extends StatelessWidget {
   }
 }
 
+class EmptyDataState extends StatelessWidget {
+  const EmptyDataState({super.key, required this.icon, required this.message});
+
+  final IconData icon;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(32),
+      children: [
+        const SizedBox(height: 80),
+        Icon(icon, size: 54, color: AppColors.moss),
+        const SizedBox(height: 16),
+        Text(
+          message,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: AppColors.muted),
+        ),
+      ],
+    );
+  }
+}
+
+class DataLoadError extends StatelessWidget {
+  const DataLoadError({
+    super.key,
+    required this.message,
+    required this.onRetry,
+  });
+
+  final String message;
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.cloud_off_outlined,
+              size: 48,
+              color: AppColors.moss,
+            ),
+            const SizedBox(height: 16),
+            Text(message, textAlign: TextAlign.center),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Tentar novamente'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class PlantCard extends StatelessWidget {
-  const PlantCard({super.key, required this.plant, this.showDelete = false});
+  const PlantCard({
+    super.key,
+    required this.plant,
+    this.showDelete = false,
+    this.onDelete,
+  });
 
   final PlantEntry plant;
   final bool showDelete;
+  final Future<void> Function()? onDelete;
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Remover registro?'),
+          content: Text('Deseja remover ${plant.name}?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Remover'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed == true) {
+      await onDelete?.call();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1304,7 +2170,9 @@ class PlantCard extends StatelessWidget {
             IconButton(
               tooltip: 'Remover',
               icon: const Icon(Icons.delete_outline, size: 18),
-              onPressed: () {},
+              onPressed: onDelete == null
+                  ? null
+                  : () => _confirmDelete(context),
             ),
         ],
       ),
