@@ -20,6 +20,13 @@ class UserResponseSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProfileUpdateResponseSchema(BaseModel):
+    user: UserResponseSchema
+    access_token: str
+    refresh_token: str
+    token_type: str
+
+
 class TokenSchema(BaseModel):
     access_token: str
     refresh_token: str
@@ -30,11 +37,16 @@ class UserUpdateSchema(BaseModel):
     email: EmailStr = Field(max_length=254)
     name: str = Field(max_length=255)
 
-class passwordResetRequestSchema(BaseModel):
+class PasswordResetRequestSchema(BaseModel):
     email: EmailStr = Field(max_length=254)
 
 
-class passwordResetSchema(BaseModel):
+class PasswordResetRequestResponseSchema(BaseModel):
+    message: str
+    reset_token: str | None = None
+
+
+class PasswordResetSchema(BaseModel):
     token: str
     new_password: str = Field(min_length=8, max_length=128)
 

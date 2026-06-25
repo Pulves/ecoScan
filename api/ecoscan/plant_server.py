@@ -9,7 +9,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from ecoscan.database import close_database, create_database_schema
+from ecoscan.database import close_database, run_database_migrations
 from ecoscan.plant_classifier import PlantClassifier
 from ecoscan.routes import auth, user
 from ecoscan.routes.plants import router as plants_router
@@ -36,8 +36,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if initialize_database:
-            await create_database_schema()
-            logger.info("Schema do banco de dados pronto.")
+            await run_database_migrations()
+            logger.info("Migracoes do banco de dados aplicadas.")
 
         service = classifier or PlantClassifier.from_environment()
         app.state.plant_classifier = service

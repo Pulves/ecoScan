@@ -198,6 +198,26 @@ class PersistedPlantRecord {
   }
 }
 
+class UserProfile {
+  const UserProfile({
+    required this.id,
+    required this.name,
+    required this.email,
+  });
+
+  factory UserProfile.fromJson(Map<String, dynamic> json) {
+    return UserProfile(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      email: json['email']?.toString() ?? '',
+    );
+  }
+
+  final String id;
+  final String name;
+  final String email;
+}
+
 class EcoScanApiClient {
   EcoScanApiClient({
     this.baseUrl,
@@ -282,6 +302,67 @@ class EcoScanApiClient {
         });
     });
     _ensureSuccess(response, expectedStatus: 201);
+  }
+
+  Future<UserProfile> fetchCurrentUser() async {
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      return http.Request('GET', Uri.parse('$baseUrl/users/'));
+    });
+    _ensureSuccess(response, expectedStatus: 200);
+    return UserProfile.fromJson(_decodeObject(response));
+  }
+
+  Future<UserProfile> updateProfile({
+    required String name,
+    required String email,
+  }) async {
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      return http.Request('PUT', Uri.parse('$baseUrl/users/'))
+        ..headers['content-type'] = 'application/json'
+        ..body = jsonEncode({'name': name, 'email': email});
+    });
+    _ensureSuccess(response, expectedStatus: 200);
+    final decoded = _decodeObject(response);
+    final userJson = decoded['user'];
+    final nextAccessToken = decoded['access_token']?.toString();
+    final nextRefreshToken = decoded['refresh_token']?.toString();
+    if (userJson is! Map<String, dynamic> ||
+        nextAccessToken == null ||
+        nextRefreshToken == null) {
+      throw const PlantIdentificationException(
+        'Resposta invalida ao atualizar o perfil.',
+      );
+    }
+    await _storeTokens(nextAccessToken, nextRefreshToken);
+    return UserProfile.fromJson(userJson);
+  }
+
+  Future<String?> requestPasswordReset(String email) async {
+    final response = await _sendWithFallback((baseUrl) {
+      return http.Request(
+          'POST',
+          Uri.parse('$baseUrl/auth/password-reset/request'),
+        )
+        ..headers['content-type'] = 'application/json'
+        ..body = jsonEncode({'email': email});
+    });
+    _ensureSuccess(response, expectedStatus: 200);
+    return _decodeObject(response)['reset_token']?.toString();
+  }
+
+  Future<void> confirmPasswordReset({
+    required String token,
+    required String newPassword,
+  }) async {
+    final response = await _sendWithFallback((baseUrl) {
+      return http.Request(
+          'POST',
+          Uri.parse('$baseUrl/auth/password-reset/confirm'),
+        )
+        ..headers['content-type'] = 'application/json'
+        ..body = jsonEncode({'token': token, 'new_password': newPassword});
+    });
+    _ensureSuccess(response, expectedStatus: 200);
   }
 
   Future<PlantIdentification> identifyPlant(Uint8List imageBytes) async {
@@ -844,6 +925,131 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _showPasswordRecovery() async {
+    var recoveryEmail = _emailController.text;
+    final email = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Recuperar senha'),
+          content: TextFormField(
+            initialValue: recoveryEmail,
+            onChanged: (value) => recoveryEmail = value,
+            keyboardType: TextInputType.emailAddress,
+            decoration: const InputDecoration(labelText: 'Email'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, recoveryEmail.trim()),
+              child: const Text('Continuar'),
+            ),
+          ],
+        );
+      },
+    );
+    if (email == null || email.isEmpty || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final resetToken = await widget.apiClient.requestPasswordReset(email);
+      if (!mounted) {
+        return;
+      }
+
+      var recoveryToken = resetToken ?? '';
+      var recoveryPassword = '';
+      final recoveryData = await showDialog<({String token, String password})>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Definir nova senha'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Informe o codigo enviado por email e a nova senha.',
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  initialValue: recoveryToken,
+                  onChanged: (value) => recoveryToken = value,
+                  decoration: const InputDecoration(
+                    labelText: 'Codigo de recuperacao',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  onChanged: (value) => recoveryPassword = value,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Nova senha (minimo 8 caracteres)',
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancelar'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, (
+                  token: recoveryToken.trim(),
+                  password: recoveryPassword,
+                )),
+                child: const Text('Alterar senha'),
+              ),
+            ],
+          );
+        },
+      );
+      if (recoveryData == null || !mounted) {
+        return;
+      }
+      if (recoveryData.token.isEmpty || recoveryData.password.length < 8) {
+        if (mounted) {
+          setState(
+            () => _errorMessage =
+                'Informe o codigo e uma senha com ao menos 8 caracteres.',
+          );
+        }
+        return;
+      }
+
+      await widget.apiClient.confirmPasswordReset(
+        token: recoveryData.token,
+        newPassword: recoveryData.password,
+      );
+      _emailController.text = email;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Senha alterada com sucesso.')),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = error is PlantIdentificationException
+              ? error.message
+              : 'Nao foi possivel recuperar a senha.';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -917,6 +1123,13 @@ class _LoginScreenState extends State<LoginScreen> {
                     onPressed: _isLoading ? null : _showRegistration,
                     child: const Text(
                       'Criar conta',
+                      style: TextStyle(color: AppColors.forest, fontSize: 12),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _isLoading ? null : _showPasswordRecovery,
+                    child: const Text(
+                      'Esqueci minha senha',
                       style: TextStyle(color: AppColors.forest, fontSize: 12),
                     ),
                   ),
@@ -1003,6 +1216,7 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
   final List<PlantEntry> _historyPlants = [];
   bool _isLoading = true;
   String? _loadError;
+  UserProfile? _profile;
 
   @override
   void initState() {
@@ -1016,6 +1230,7 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
       _loadError = null;
     });
     try {
+      final profile = await widget.apiClient.fetchCurrentUser();
       final results = await Future.wait([
         widget.apiClient.fetchHistory(),
         widget.apiClient.fetchLibrary(),
@@ -1024,6 +1239,7 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
         return;
       }
       setState(() {
+        _profile = profile;
         _historyPlants
           ..clear()
           ..addAll(results[0].map(_entryFromRecord));
@@ -1133,6 +1349,32 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
     );
   }
 
+  Future<void> _openSettings() async {
+    final profile = _profile;
+    if (profile == null) {
+      _showDataError(
+        const PlantIdentificationException(
+          'Nao foi possivel carregar o perfil.',
+        ),
+      );
+      return;
+    }
+
+    final updatedProfile = await Navigator.of(context).push<UserProfile>(
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          profile: profile,
+          onSave: ({required String name, required String email}) {
+            return widget.apiClient.updateProfile(name: name, email: email);
+          },
+        ),
+      ),
+    );
+    if (updatedProfile != null && mounted) {
+      setState(() => _profile = updatedProfile);
+    }
+  }
+
   String _formatDate(DateTime date) {
     final day = date.day.toString().padLeft(2, '0');
     final month = date.month.toString().padLeft(2, '0');
@@ -1147,12 +1389,14 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
         onDelete: _removeFromLibrary,
         onRefresh: _loadPersistedPlants,
         onLogout: _logout,
+        onSettings: _openSettings,
       ),
       HistoryScreen(
         plants: _historyPlants,
         onDelete: _deleteHistory,
         onRefresh: _loadPersistedPlants,
         onLogout: _logout,
+        onSettings: _openSettings,
       ),
       CaptureScreen(
         onBack: () => setState(() => _selectedIndex = 1),
@@ -1280,12 +1524,14 @@ class ScreenHeader extends StatelessWidget {
     this.showBackButton = false,
     this.onBack,
     this.onLogout,
+    this.onSettings,
   });
 
   final String title;
   final bool showBackButton;
   final VoidCallback? onBack;
   final Future<void> Function()? onLogout;
+  final Future<void> Function()? onSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -1319,7 +1565,7 @@ class ScreenHeader extends StatelessWidget {
               if (!showBackButton) ...[
                 IconButton(
                   tooltip: 'Configuracoes',
-                  onPressed: () {},
+                  onPressed: onSettings,
                   icon: const Icon(Icons.settings_outlined),
                 ),
                 IconButton(
@@ -1345,6 +1591,133 @@ class ScreenHeader extends StatelessWidget {
   }
 }
 
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({
+    super.key,
+    required this.profile,
+    required this.onSave,
+  });
+
+  final UserProfile profile;
+  final Future<UserProfile> Function({
+    required String name,
+    required String email,
+  })
+  onSave;
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  late final TextEditingController _nameController;
+  late final TextEditingController _emailController;
+  bool _isSaving = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.profile.name);
+    _emailController = TextEditingController(text: widget.profile.email);
+  }
+
+  Future<void> _save() async {
+    final name = _nameController.text.trim();
+    final email = _emailController.text.trim();
+    if (name.isEmpty || email.isEmpty) {
+      setState(() => _errorMessage = 'Informe nome e email.');
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+      _errorMessage = null;
+    });
+    try {
+      final profile = await widget.onSave(name: name, email: email);
+      if (mounted) {
+        Navigator.pop(context, profile);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = error is PlantIdentificationException
+              ? error.message
+              : 'Nao foi possivel atualizar o perfil.';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Configuracoes')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            const Text(
+              'Perfil',
+              style: TextStyle(fontSize: 26, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 22),
+            TextField(
+              controller: _nameController,
+              decoration: const InputDecoration(
+                labelText: 'Nome',
+                prefixIcon: Icon(Icons.person_outline),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _emailController,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(
+                labelText: 'Email',
+                prefixIcon: Icon(Icons.email_outlined),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            if (_errorMessage != null) ...[
+              const SizedBox(height: 14),
+              Text(_errorMessage!, style: const TextStyle(color: Colors.red)),
+            ],
+            const SizedBox(height: 24),
+            FilledButton.icon(
+              onPressed: _isSaving ? null : _save,
+              icon: _isSaving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.save_outlined),
+              label: const Text('Salvar alteracoes'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _emailController.dispose();
+    super.dispose();
+  }
+}
+
 class HistoryScreen extends StatelessWidget {
   const HistoryScreen({
     super.key,
@@ -1352,19 +1725,25 @@ class HistoryScreen extends StatelessWidget {
     required this.onDelete,
     required this.onRefresh,
     required this.onLogout,
+    required this.onSettings,
   });
 
   final List<PlantEntry> plants;
   final Future<void> Function(PlantEntry plant) onDelete;
   final Future<void> Function() onRefresh;
   final Future<void> Function() onLogout;
+  final Future<void> Function() onSettings;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ScreenHeader(title: 'Historico', onLogout: onLogout),
+        ScreenHeader(
+          title: 'Historico',
+          onLogout: onLogout,
+          onSettings: onSettings,
+        ),
         Expanded(
           child: RefreshIndicator(
             onRefresh: onRefresh,
@@ -1407,19 +1786,25 @@ class LibraryScreen extends StatelessWidget {
     required this.onDelete,
     required this.onRefresh,
     required this.onLogout,
+    required this.onSettings,
   });
 
   final List<PlantEntry> plants;
   final Future<void> Function(PlantEntry plant) onDelete;
   final Future<void> Function() onRefresh;
   final Future<void> Function() onLogout;
+  final Future<void> Function() onSettings;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ScreenHeader(title: 'Minha Biblioteca', onLogout: onLogout),
+        ScreenHeader(
+          title: 'Minha Biblioteca',
+          onLogout: onLogout,
+          onSettings: onSettings,
+        ),
         Expanded(
           child: RefreshIndicator(
             onRefresh: onRefresh,

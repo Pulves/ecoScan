@@ -79,6 +79,16 @@ void main() {
         if (request.url.path == '/history' || request.url.path == '/library') {
           return http.Response('[]', 200);
         }
+        if (request.url.path == '/users/') {
+          return http.Response(
+            jsonEncode({
+              'id': 'user-id',
+              'name': 'User',
+              'email': 'user@example.com',
+            }),
+            200,
+          );
+        }
         return http.Response('Not found', 404);
       }),
     );
@@ -202,6 +212,132 @@ void main() {
 
     expect(find.text('Entrar'), findsOneWidget);
     expect(find.text('Email'), findsOneWidget);
+  });
+
+  testWidgets('Password recovery accepts the code received by email', (
+    tester,
+  ) async {
+    Map<String, dynamic>? confirmation;
+    final apiClient = EcoScanApiClient(
+      baseUrl: 'http://api.test',
+      tokenStorage: MemoryTokenStorage(),
+      client: MockClient((request) async {
+        if (request.url.path == '/auth/password-reset/request') {
+          expect(jsonDecode(request.body), {'email': 'user@example.com'});
+          return http.Response(
+            jsonEncode({
+              'message': 'Instrucoes enviadas.',
+              'reset_token': null,
+            }),
+            200,
+          );
+        }
+        if (request.url.path == '/auth/password-reset/confirm') {
+          confirmation = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            jsonEncode({'message': 'Senha alterada com sucesso.'}),
+            200,
+          );
+        }
+        return http.Response('Not found', 404);
+      }),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(home: LoginScreen(apiClient: apiClient)),
+    );
+    await tester.tap(find.text('Esqueci minha senha'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextFormField).last, 'user@example.com');
+    await tester.tap(find.text('Continuar'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('Codigo de recuperacao'), findsOneWidget);
+    final recoveryFields = find.byType(TextFormField);
+    await tester.enterText(recoveryFields.first, 'email-code');
+    await tester.enterText(recoveryFields.last, 'new-password');
+    await tester.tap(find.text('Alterar senha'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(confirmation, {
+      'token': 'email-code',
+      'new_password': 'new-password',
+    });
+    expect(find.text('Senha alterada com sucesso.'), findsOneWidget);
+  });
+
+  testWidgets('Settings screen edits name and email', (tester) async {
+    UserProfile? submittedProfile;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(
+          profile: const UserProfile(
+            id: 'user-id',
+            name: 'Nome antigo',
+            email: 'old@example.com',
+          ),
+          onSave: ({required name, required email}) async {
+            submittedProfile = UserProfile(
+              id: 'user-id',
+              name: name,
+              email: email,
+            );
+            return submittedProfile!;
+          },
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField).at(0), 'Nome novo');
+    await tester.enterText(find.byType(TextField).at(1), 'new@example.com');
+    await tester.tap(find.text('Salvar alteracoes'));
+    await tester.pumpAndSettle();
+
+    expect(submittedProfile?.name, 'Nome novo');
+    expect(submittedProfile?.email, 'new@example.com');
+  });
+
+  testWidgets('Deleting a record requires explicit confirmation', (
+    tester,
+  ) async {
+    var deleteCalls = 0;
+    const plant = PlantEntry(
+      id: 'plant-id',
+      name: 'Mangueira',
+      date: '24/06/2026',
+      subtitle: 'Confianca 93%',
+      palette: [Colors.green, Colors.lightGreen],
+      icon: Icons.local_florist,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PlantCard(
+            plant: plant,
+            showDelete: true,
+            onDelete: () async => deleteCalls++,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Remover'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remover registro?'), findsOneWidget);
+    expect(deleteCalls, 0);
+
+    await tester.tap(find.text('Cancelar'));
+    await tester.pumpAndSettle();
+    expect(deleteCalls, 0);
+
+    await tester.tap(find.byTooltip('Remover'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Remover'));
+    await tester.pumpAndSettle();
+    expect(deleteCalls, 1);
   });
 
   test(
@@ -446,5 +582,83 @@ void main() {
     expect(userCalls, 2);
     expect(tokenStorage.accessToken, 'renewed-access');
     expect(tokenStorage.refreshToken, 'renewed-refresh');
+  });
+
+  test('EcoScanApiClient updates profile and rotates session tokens', () async {
+    final tokenStorage = MemoryTokenStorage();
+    final client = MockClient((request) async {
+      expect(request.method, 'PUT');
+      expect(request.url.path, '/users/');
+      expect(request.headers['authorization'], 'Bearer old-access');
+      expect(jsonDecode(request.body), {
+        'name': 'Nome novo',
+        'email': 'new@example.com',
+      });
+      return http.Response(
+        jsonEncode({
+          'user': {
+            'id': 'user-id',
+            'name': 'Nome novo',
+            'email': 'new@example.com',
+          },
+          'access_token': 'new-access',
+          'refresh_token': 'new-refresh',
+          'token_type': 'bearer',
+        }),
+        200,
+      );
+    });
+    final api = EcoScanApiClient(
+      baseUrl: 'http://api.test',
+      client: client,
+      tokenStorage: tokenStorage,
+      accessToken: 'old-access',
+      refreshToken: 'old-refresh',
+    );
+
+    final profile = await api.updateProfile(
+      name: 'Nome novo',
+      email: 'new@example.com',
+    );
+
+    expect(profile.name, 'Nome novo');
+    expect(tokenStorage.accessToken, 'new-access');
+    expect(tokenStorage.refreshToken, 'new-refresh');
+  });
+
+  test('EcoScanApiClient requests and confirms password reset', () async {
+    final calls = <String>[];
+    final client = MockClient((request) async {
+      calls.add(request.url.path);
+      if (request.url.path == '/auth/password-reset/request') {
+        expect(jsonDecode(request.body), {'email': 'user@example.com'});
+        return http.Response(
+          jsonEncode({
+            'message': 'Token criado.',
+            'reset_token': 'reset-token',
+          }),
+          200,
+        );
+      }
+      expect(request.url.path, '/auth/password-reset/confirm');
+      expect(jsonDecode(request.body), {
+        'token': 'reset-token',
+        'new_password': 'new-password',
+      });
+      return http.Response(jsonEncode({'message': 'Senha alterada.'}), 200);
+    });
+    final api = EcoScanApiClient(
+      baseUrl: 'http://api.test',
+      client: client,
+      tokenStorage: MemoryTokenStorage(),
+    );
+
+    final token = await api.requestPasswordReset('user@example.com');
+    await api.confirmPasswordReset(token: token!, newPassword: 'new-password');
+
+    expect(calls, [
+      '/auth/password-reset/request',
+      '/auth/password-reset/confirm',
+    ]);
   });
 }

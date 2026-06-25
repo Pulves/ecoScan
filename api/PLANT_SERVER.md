@@ -42,6 +42,8 @@ O servidor escuta em todas as interfaces na porta `8000`:
 - Cadastro de usuario: `POST http://localhost:8000/users/`
 - Autenticacao: `POST http://localhost:8000/auth/token`
 - Renovacao da sessao: `POST http://localhost:8000/auth/refresh`
+- Solicitar recuperacao: `POST http://localhost:8000/auth/password-reset/request`
+- Confirmar nova senha: `POST http://localhost:8000/auth/password-reset/confirm`
 - Saude do modelo: `GET http://localhost:8000/plants/health`
 - Reconhecimento: `POST http://localhost:8000/plants/identify`
 - Salvar/listar historico: `POST/GET http://localhost:8000/history`
@@ -55,6 +57,17 @@ funcionando e o reconhecimento responde com HTTP `503`.
 A autenticacao retorna um access token de curta duracao e um refresh token.
 O aplicativo armazena ambos com `flutter_secure_storage` e usa
 `/auth/refresh` para renovar a sessao sem exigir um novo login.
+
+Em desenvolvimento, `PASSWORD_RESET_EXPOSE_TOKEN=true` devolve o token de
+recuperacao diretamente para o aplicativo. Em producao, o arquivo
+`docker-compose.prod.yml` fixa essa opcao como `false` e a API envia o codigo
+por SMTP. O aplicativo permite informar o codigo recebido por email junto da
+nova senha.
+
+Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL` e, quando exigidos pelo
+provedor, `SMTP_USERNAME` e `SMTP_PASSWORD`. Use `SMTP_USE_TLS=true` para
+STARTTLS (normalmente porta 587) ou `SMTP_USE_SSL=true` para TLS implicito
+(normalmente porta 465), nunca ambos.
 
 ## Docker
 
@@ -76,6 +89,63 @@ docker compose ps
 
 O Postgres fica disponivel na porta `5432` e a API na porta `8000`.
 O container da API so fica saudavel quando o modelo estiver carregado.
+
+## Migracoes do banco
+
+O startup da API executa `alembic upgrade head`. O schema nao depende mais de
+`create_all`. Na primeira execucao sobre um banco antigo, o bootstrap detecta
+as tabelas existentes, marca a revisao compatível (`0001` ou `0002`) e aplica
+apenas as revisoes posteriores.
+
+Comandos manuais:
+
+```powershell
+cd api
+.\.venv\Scripts\python.exe -m alembic -c .\ecoscan\alembic.ini current
+.\.venv\Scripts\python.exe -m alembic -c .\ecoscan\alembic.ini upgrade head
+```
+
+As revisoes versionadas ficam em `api/ecoscan/migrations/versions`.
+
+## Backup, restauracao e limpeza
+
+O backup usa `pg_dump` no formato custom e inclui usuarios, metadados e bytes
+das imagens:
+
+```powershell
+cd api
+.\scripts\backup.ps1
+```
+
+Os arquivos sao gravados em `api/backups`, pasta ignorada pelo Git. Copie os
+dumps para armazenamento externo e aplique uma politica de retencao adequada.
+
+Restauracao destrutiva:
+
+```powershell
+.\scripts\restore.ps1 `
+  -BackupFile .\backups\ecoscan-AAAAMMDD-HHMMSS.dump `
+  -ConfirmRestore
+```
+
+Identificacoes fora da biblioteca podem ser removidas depois do periodo de
+retencao. O comando e apenas informativo por padrao:
+
+```powershell
+docker compose exec api `
+  python -m ecoscan.maintenance cleanup-images --days 90
+
+docker compose exec api `
+  python -m ecoscan.maintenance cleanup-images --days 90 --apply
+```
+
+Registros presentes na biblioteca nunca sao removidos por essa limpeza.
+Tokens de recuperacao expirados podem ser limpos com:
+
+```powershell
+docker compose exec api `
+  python -m ecoscan.maintenance cleanup-reset-tokens --apply
+```
 
 Teste pelo PowerShell:
 
@@ -173,8 +243,29 @@ $env:ECOSCAN_METADATA_PATH = "C:\modelos\model_metadata.json"
 $env:ECOSCAN_DEVICE = "cpu"
 $env:ECOSCAN_HOST = "0.0.0.0"
 $env:ECOSCAN_PORT = "8000"
+$env:PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = "15"
+$env:PASSWORD_RESET_EXPOSE_TOKEN = "false"
+$env:SMTP_HOST = "smtp.example.com"
+$env:SMTP_PORT = "587"
+$env:SMTP_USERNAME = "smtp-user"
+$env:SMTP_PASSWORD = "smtp-password"
+$env:SMTP_FROM_EMAIL = "noreply@example.com"
+$env:SMTP_FROM_NAME = "EcoScan"
+$env:SMTP_USE_TLS = "true"
+$env:SMTP_USE_SSL = "false"
+$env:IMAGE_RETENTION_DAYS = "90"
 python -m ecoscan.plant_server
 ```
+
+Para subir a configuracao de producao:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+O Compose interrompe a inicializacao se `SMTP_HOST` ou `SMTP_FROM_EMAIL`
+estiverem ausentes. Mantenha as credenciais somente em `api/.env` ou no
+gerenciador de segredos do ambiente; esse arquivo nao e versionado.
 
 Para usar uma GPU NVIDIA configurada para o PyTorch, defina
 `ECOSCAN_DEVICE=0`.

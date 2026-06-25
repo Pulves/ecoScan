@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4, UUID
 
-from sqlalchemy import LargeBinary, ForeignKey, func
+from sqlalchemy import DateTime, LargeBinary, ForeignKey, func
 
 from sqlalchemy.orm import (Mapped, 
                             mapped_column, relationship, 
@@ -69,5 +69,31 @@ class Identification:
         server_default=func.now(),
         init=False,
         index=True,
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default_factory=uuid4)
+
+
+@mapped_as_dataclass(table_registry)
+class PasswordResetToken:
+    __tablename__ = "password_reset_tokens"
+
+    token_hash: Mapped[str] = mapped_column(nullable=False, unique=True, index=True)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        default=None,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        server_default=func.now(),
+        init=False,
     )
     id: Mapped[UUID] = mapped_column(primary_key=True, default_factory=uuid4)

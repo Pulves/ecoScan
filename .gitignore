@@ -37,6 +37,7 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/api/backups/
 
 # Symbolication related
 app.*.symbols
