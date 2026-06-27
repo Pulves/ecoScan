@@ -42,4 +42,11 @@ class UserLoginSchema(BaseModel):
 class PatchUserSchema(BaseModel):
     email: EmailStr | None = Field(default=None, max_length=254)
     name: str | None = Field(default=None, max_length=255)
-    
+
+class FichaTecnicaSchema(BaseModel):
+    habitat: str | None
+    scientific_name: str | None
+    care_information: str | None
+    characteristics: str | None
+    botanical_family: str | None
+

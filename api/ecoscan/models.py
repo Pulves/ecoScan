@@ -1,15 +1,11 @@
 from datetime import datetime
-from typing import Annotated
 from uuid import uuid4, UUID
-
-from fastapi import Depends
 from sqlalchemy import ForeignKey, func
 from sqlalchemy.orm import (Mapped, 
                             mapped_column, relationship, 
                             mapped_as_dataclass, registry
                         )
 
-from ecoscan.database import get_session
 
 
 table_registry = registry()

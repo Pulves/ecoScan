@@ -4,9 +4,8 @@ from typing import Annotated
 
 from ecoscan.security import get_password_hash, get_current_user
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 
 from ecoscan.models import User
 from ecoscan.validators import UserFieldsValidator, EmailValidator, NameValidator
