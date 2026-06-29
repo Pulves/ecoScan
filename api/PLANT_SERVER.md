@@ -228,10 +228,38 @@ Future<Map<String, dynamic>> identifyPlant(
 }
 ```
 
-No emulador Android, use `http://10.0.2.2:8000`. Em um celular fisico conectado
-por USB, execute `adb reverse tcp:8000 tcp:8000` e use
-`http://127.0.0.1:8000`. Tambem e possivel usar o IP local do computador quando
-ambos estiverem na mesma rede e a porta `8000` estiver liberada no firewall.
+No emulador Android, use `http://10.0.2.2:8000`.
+
+## Uso sem cabo USB na rede local
+
+O Compose de desenvolvimento publica a API em `0.0.0.0:8000`. O aplicativo
+debug procura automaticamente uma API EcoScan nos enderecos privados da mesma
+sub-rede Wi-Fi e reutiliza o endereco encontrado durante a sessao. Nao e
+necessario executar `adb reverse` nem manter o cabo conectado.
+
+No Windows, abra um PowerShell como Administrador uma unica vez e execute:
+
+```powershell
+cd api
+.\scripts\enable-lan-access.ps1
+```
+
+A regra padrao libera TCP 8000 somente para `192.168.0.0/24`, inclusive quando
+o Wi-Fi do Windows esta marcado como publico. Informe `-RemoteAddress` se a
+rede local usar outra faixa. O computador e o celular precisam estar na mesma
+rede, sem isolamento de clientes Wi-Fi. Em producao, a descoberta LAN e
+desativada e o app exige a URL HTTPS definida por `ECOSCAN_API_BASE_URL`.
+
+Se o Docker Desktop tiver criado duas regras publicas de bloqueio para
+`com.docker.backend.exe`, elas prevalecem sobre a permissao acima. Depois de
+conferir que sao exatamente essas duas regras, desabilite somente elas com:
+
+```powershell
+.\scripts\allow-docker-lan-forwarding.ps1 -Confirm
+```
+
+O script aborta sem alteracoes se encontrar uma quantidade ou configuracao
+diferente e nao modifica a politica padrao do Firewall.
 
 ## Configuracao opcional
 
@@ -260,12 +288,21 @@ python -m ecoscan.plant_server
 Para subir a configuracao de producao:
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose `
+  --env-file .env.production `
+  -f docker-compose.yml `
+  -f docker-compose.prod.yml `
+  up -d --build
 ```
 
-O Compose interrompe a inicializacao se `SMTP_HOST` ou `SMTP_FROM_EMAIL`
-estiverem ausentes. Mantenha as credenciais somente em `api/.env` ou no
+O Caddy publica a API com HTTPS e renovacao automatica do certificado. O
+Compose interrompe a inicializacao se dominio, email ACME, segredos ou SMTP
+estiverem ausentes. Mantenha as credenciais somente em `.env.production` ou no
 gerenciador de segredos do ambiente; esse arquivo nao e versionado.
+
+Em producao, `CORS_ALLOWED_ORIGINS` aceita somente origens HTTPS explicitas e
+`ALLOWED_HOSTS` deve conter o dominio publico da API. A documentacao OpenAPI
+fica desativada por padrao.
 
 Para usar uma GPU NVIDIA configurada para o PyTorch, defina
 `ECOSCAN_DEVICE=0`.

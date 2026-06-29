@@ -1,8 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -18,6 +19,34 @@ typedef PlantIdentifier =
 
 const _configuredApiBaseUrl = String.fromEnvironment('ECOSCAN_API_BASE_URL');
 const _defaultApiBaseUrls = ['http://127.0.0.1:8000', 'http://10.0.2.2:8000'];
+
+List<String> resolveApiBaseUrlCandidates({
+  String? customBaseUrl,
+  String configuredBaseUrl = _configuredApiBaseUrl,
+  bool releaseMode = kReleaseMode,
+}) {
+  final selectedBaseUrl = customBaseUrl?.trim().isNotEmpty == true
+      ? customBaseUrl!.trim()
+      : configuredBaseUrl.trim();
+
+  if (selectedBaseUrl.isNotEmpty) {
+    final uri = Uri.tryParse(selectedBaseUrl);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      throw StateError('A URL da API e invalida: $selectedBaseUrl');
+    }
+    if (releaseMode && uri.scheme.toLowerCase() != 'https') {
+      throw StateError('O release do EcoScan exige uma API HTTPS.');
+    }
+    return [selectedBaseUrl.replaceFirst(RegExp(r'/+$'), '')];
+  }
+
+  if (releaseMode) {
+    throw StateError(
+      'Defina ECOSCAN_API_BASE_URL com --dart-define para gerar o release.',
+    );
+  }
+  return _defaultApiBaseUrls;
+}
 
 abstract interface class TokenStorage {
   Future<String?> readAccessToken();
@@ -231,6 +260,7 @@ class EcoScanApiClient {
   final String? baseUrl;
   final http.Client? client;
   final Duration timeout;
+  String? _resolvedBaseUrl;
   final TokenStorage tokenStorage;
   String? accessToken;
   String? refreshToken;
@@ -335,6 +365,14 @@ class EcoScanApiClient {
     }
     await _storeTokens(nextAccessToken, nextRefreshToken);
     return UserProfile.fromJson(userJson);
+  }
+
+  Future<void> deleteAccount() async {
+    final response = await _sendAuthenticatedWithFallback((baseUrl) {
+      return http.Request('DELETE', Uri.parse('$baseUrl/users/'));
+    });
+    _ensureSuccess(response, expectedStatus: 204);
+    await logout();
   }
 
   Future<String?> requestPasswordReset(String email) async {
@@ -457,16 +495,104 @@ class EcoScanApiClient {
   }
 
   List<String> get _baseUrlCandidates {
-    if (baseUrl case final customBaseUrl?
-        when customBaseUrl.trim().isNotEmpty) {
-      return [customBaseUrl];
+    final candidates = resolveApiBaseUrlCandidates(customBaseUrl: baseUrl);
+    final resolvedBaseUrl = _resolvedBaseUrl;
+    if (resolvedBaseUrl == null || candidates.contains(resolvedBaseUrl)) {
+      return candidates;
+    }
+    return [resolvedBaseUrl, ...candidates];
+  }
+
+  bool get _canDiscoverLanApi {
+    return !kReleaseMode &&
+        (baseUrl == null || baseUrl!.trim().isEmpty) &&
+        _configuredApiBaseUrl.trim().isEmpty;
+  }
+
+  Future<String?> _discoverLanApi() async {
+    List<NetworkInterface> interfaces;
+    try {
+      interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLoopback: false,
+      );
+    } on SocketException {
+      return null;
     }
 
-    if (_configuredApiBaseUrl.trim().isNotEmpty) {
-      return [_configuredApiBaseUrl];
+    final ownAddresses = interfaces
+        .expand((interface) => interface.addresses)
+        .map((address) => address.address)
+        .where(_isPrivateIpv4)
+        .toSet();
+    final prefixes = ownAddresses
+        .map((address) => address.substring(0, address.lastIndexOf('.')))
+        .toSet();
+    if (prefixes.isEmpty) {
+      return null;
     }
 
-    return _defaultApiBaseUrls;
+    final discoveryClient = http.Client();
+    try {
+      for (final prefix in prefixes) {
+        final hosts = [
+          for (var host = 1; host <= 254; host++)
+            if (!ownAddresses.contains('$prefix.$host')) '$prefix.$host',
+        ];
+        const batchSize = 32;
+        for (var start = 0; start < hosts.length; start += batchSize) {
+          final nextEnd = start + batchSize;
+          final end = nextEnd < hosts.length ? nextEnd : hosts.length;
+          final results = await Future.wait(
+            hosts
+                .sublist(start, end)
+                .map((host) => _probeEcoScanApi(discoveryClient, host)),
+          );
+          for (final result in results) {
+            if (result != null) {
+              _resolvedBaseUrl = result;
+              return result;
+            }
+          }
+        }
+      }
+    } finally {
+      discoveryClient.close();
+    }
+    return null;
+  }
+
+  Future<String?> _probeEcoScanApi(http.Client client, String host) async {
+    final candidate = 'http://$host:8000';
+    try {
+      final response = await client
+          .get(Uri.parse('$candidate/plants/health'))
+          .timeout(const Duration(milliseconds: 600));
+      if (response.statusCode != 200) {
+        return null;
+      }
+      final body = jsonDecode(utf8.decode(response.bodyBytes));
+      if (body is Map<String, dynamic> &&
+          body.containsKey('model_loaded') &&
+          body.containsKey('status')) {
+        return candidate;
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  bool _isPrivateIpv4(String address) {
+    final parts = address.split('.').map(int.tryParse).toList();
+    if (parts.length != 4 || parts.any((part) => part == null)) {
+      return false;
+    }
+    final first = parts[0]!;
+    final second = parts[1]!;
+    return first == 10 ||
+        (first == 172 && second >= 16 && second <= 31) ||
+        (first == 192 && second == 168);
   }
 
   Map<String, String> get _authorizationHeaders {
@@ -516,7 +642,17 @@ class EcoScanApiClient {
     final activeClient = client ?? http.Client();
     Object? lastNetworkError;
     try {
-      for (final candidateBaseUrl in _baseUrlCandidates) {
+      final candidateBaseUrls = [..._baseUrlCandidates];
+      if (_canDiscoverLanApi && _resolvedBaseUrl == null) {
+        final discoveredBaseUrl = await _discoverLanApi();
+        if (discoveredBaseUrl != null) {
+          candidateBaseUrls
+            ..remove(discoveredBaseUrl)
+            ..insert(0, discoveredBaseUrl);
+        }
+      }
+
+      for (final candidateBaseUrl in candidateBaseUrls) {
         final normalizedBaseUrl = candidateBaseUrl.endsWith('/')
             ? candidateBaseUrl.substring(0, candidateBaseUrl.length - 1)
             : candidateBaseUrl;
@@ -525,6 +661,9 @@ class EcoScanApiClient {
           final streamedResponse = await activeClient
               .send(request)
               .timeout(timeout);
+          if (_canDiscoverLanApi) {
+            _resolvedBaseUrl = normalizedBaseUrl;
+          }
           return await http.Response.fromStream(streamedResponse);
         } on TimeoutException catch (error) {
           lastNetworkError = error;
@@ -541,11 +680,12 @@ class EcoScanApiClient {
     if (lastNetworkError is TimeoutException) {
       throw const PlantIdentificationException(
         'Tempo esgotado ao chamar a API. '
-        'Verifique se o adb reverse tcp:8000 tcp:8000 esta ativo.',
+        'Verifique se o celular e o computador estao na mesma rede Wi-Fi.',
       );
     }
     throw const PlantIdentificationException(
-      'Nao foi possivel conectar a API na porta 8000.',
+      'Nao foi possivel localizar a API EcoScan na rede local. '
+      'Verifique a porta 8000 e o firewall do computador.',
     );
   }
 
@@ -1360,18 +1500,24 @@ class _EcoHomeShellState extends State<EcoHomeShell> {
       return;
     }
 
-    final updatedProfile = await Navigator.of(context).push<UserProfile>(
+    final outcome = await Navigator.of(context).push<Object?>(
       MaterialPageRoute(
         builder: (_) => SettingsScreen(
           profile: profile,
           onSave: ({required String name, required String email}) {
             return widget.apiClient.updateProfile(name: name, email: email);
           },
+          onDeleteAccount: widget.apiClient.deleteAccount,
         ),
       ),
     );
-    if (updatedProfile != null && mounted) {
-      setState(() => _profile = updatedProfile);
+    if (!mounted) {
+      return;
+    }
+    if (outcome is UserProfile) {
+      setState(() => _profile = outcome);
+    } else if (outcome == true) {
+      await _logout();
     }
   }
 
@@ -1596,6 +1742,7 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.profile,
     required this.onSave,
+    required this.onDeleteAccount,
   });
 
   final UserProfile profile;
@@ -1604,6 +1751,7 @@ class SettingsScreen extends StatefulWidget {
     required String email,
   })
   onSave;
+  final Future<void> Function() onDeleteAccount;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -1645,6 +1793,58 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _errorMessage = error is PlantIdentificationException
               ? error.message
               : 'Nao foi possivel atualizar o perfil.';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
+    }
+  }
+
+  Future<void> _deleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Excluir conta?'),
+          content: const Text(
+            'Esta acao remove permanentemente a conta, o historico, '
+            'a biblioteca e as imagens salvas. Ela nao pode ser desfeita.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text('Excluir definitivamente'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+      _errorMessage = null;
+    });
+    try {
+      await widget.onDeleteAccount();
+      if (mounted) {
+        Navigator.pop(context, true);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = error is PlantIdentificationException
+              ? error.message
+              : 'Nao foi possivel excluir a conta.';
         });
       }
     } finally {
@@ -1704,6 +1904,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : const Icon(Icons.save_outlined),
               label: const Text('Salvar alteracoes'),
             ),
+            const SizedBox(height: 24),
+            OutlinedButton.icon(
+              onPressed: _isSaving
+                  ? null
+                  : () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => const PrivacyPolicyScreen(),
+                        ),
+                      );
+                    },
+              icon: const Icon(Icons.privacy_tip_outlined),
+              label: const Text('Politica de privacidade'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _isSaving ? null : _deleteAccount,
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+              icon: const Icon(Icons.delete_forever_outlined),
+              label: const Text('Excluir minha conta'),
+            ),
           ],
         ),
       ),
@@ -1715,6 +1936,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _nameController.dispose();
     _emailController.dispose();
     super.dispose();
+  }
+}
+
+class PrivacyPolicyScreen extends StatelessWidget {
+  const PrivacyPolicyScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Politica de privacidade')),
+      body: const SafeArea(
+        child: SingleChildScrollView(
+          padding: EdgeInsets.all(24),
+          child: SelectableText(
+            'Vigencia: 25 de junho de 2026\n\n'
+            'O EcoScan trata nome, email, senha em formato de hash, fotos de '
+            'plantas, resultados de identificacao, confianca, datas e dados '
+            'do historico e da biblioteca para autenticar o usuario e '
+            'oferecer as funcoes do aplicativo.\n\n'
+            'A camera e acessada somente quando o usuario abre a captura. '
+            'As fotos enviadas sao processadas pelo modelo e, quando salvas, '
+            'ficam vinculadas a conta no banco de dados.\n\n'
+            'A comunicacao de producao usa HTTPS, e os tokens de sessao ficam '
+            'no armazenamento seguro do Android. Os dados nao sao vendidos. '
+            'Fornecedores de hospedagem e email podem processar dados apenas '
+            'para operar o servico.\n\n'
+            'Identificacoes podem ser excluidas pelo aplicativo. Registros '
+            'fora da biblioteca podem ser limpos apos 90 dias. A conta e '
+            'todos os dados associados podem ser excluidos em Configuracoes '
+            '> Excluir minha conta.\n\n'
+            'Politica completa e contato:\n'
+            'https://github.com/Pulves/ecoScan/blob/front_app/'
+            'PRIVACY_POLICY.md',
+            style: TextStyle(fontSize: 16, height: 1.45),
+          ),
+        ),
+      ),
+    );
   }
 }
 

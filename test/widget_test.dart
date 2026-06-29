@@ -60,6 +60,28 @@ class FailingTokenStorage implements TokenStorage {
 }
 
 void main() {
+  test('Release requires an explicit HTTPS API URL', () {
+    expect(
+      () =>
+          resolveApiBaseUrlCandidates(configuredBaseUrl: '', releaseMode: true),
+      throwsStateError,
+    );
+    expect(
+      () => resolveApiBaseUrlCandidates(
+        configuredBaseUrl: 'http://api.example.com',
+        releaseMode: true,
+      ),
+      throwsStateError,
+    );
+    expect(
+      resolveApiBaseUrlCandidates(
+        configuredBaseUrl: 'https://api.example.com/',
+        releaseMode: true,
+      ),
+      ['https://api.example.com'],
+    );
+  });
+
   testWidgets('EcoScan login opens the main plant screens', (tester) async {
     final tokenStorage = MemoryTokenStorage();
     final apiClient = EcoScanApiClient(
@@ -287,6 +309,7 @@ void main() {
             );
             return submittedProfile!;
           },
+          onDeleteAccount: () async {},
         ),
       ),
     );
@@ -298,6 +321,49 @@ void main() {
 
     expect(submittedProfile?.name, 'Nome novo');
     expect(submittedProfile?.email, 'new@example.com');
+  });
+
+  testWidgets('Settings exposes privacy and confirms account deletion', (
+    tester,
+  ) async {
+    var deleteCalls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SettingsScreen(
+          profile: const UserProfile(
+            id: 'user-id',
+            name: 'User',
+            email: 'user@example.com',
+          ),
+          onSave: ({required name, required email}) async {
+            return UserProfile(id: 'user-id', name: name, email: email);
+          },
+          onDeleteAccount: () async => deleteCalls++,
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Politica de privacidade'));
+    await tester.pumpAndSettle();
+    expect(find.text('Politica de privacidade'), findsOneWidget);
+    expect(find.textContaining('A camera e acessada'), findsOneWidget);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Excluir minha conta'));
+    await tester.pumpAndSettle();
+    expect(find.text('Excluir conta?'), findsOneWidget);
+    expect(deleteCalls, 0);
+
+    await tester.tap(find.text('Cancelar'));
+    await tester.pumpAndSettle();
+    expect(deleteCalls, 0);
+
+    await tester.tap(find.text('Excluir minha conta'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Excluir definitivamente'));
+    await tester.pumpAndSettle();
+    expect(deleteCalls, 1);
   });
 
   testWidgets('Deleting a record requires explicit confirmation', (
@@ -624,6 +690,30 @@ void main() {
     expect(profile.name, 'Nome novo');
     expect(tokenStorage.accessToken, 'new-access');
     expect(tokenStorage.refreshToken, 'new-refresh');
+  });
+
+  test('EcoScanApiClient deletes account and clears tokens', () async {
+    final tokenStorage = MemoryTokenStorage()
+      ..accessToken = 'stored-access'
+      ..refreshToken = 'stored-refresh';
+    final client = MockClient((request) async {
+      expect(request.method, 'DELETE');
+      expect(request.url.path, '/users/');
+      expect(request.headers['authorization'], 'Bearer stored-access');
+      return http.Response('', 204);
+    });
+    final api = EcoScanApiClient(
+      baseUrl: 'http://api.test',
+      client: client,
+      tokenStorage: tokenStorage,
+      accessToken: 'stored-access',
+      refreshToken: 'stored-refresh',
+    );
+
+    await api.deleteAccount();
+
+    expect(tokenStorage.accessToken, isNull);
+    expect(tokenStorage.refreshToken, isNull);
   });
 
   test('EcoScanApiClient requests and confirms password reset', () async {

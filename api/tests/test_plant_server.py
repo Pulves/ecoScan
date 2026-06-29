@@ -1,12 +1,15 @@
 from io import BytesIO
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from ecoscan import database
 from ecoscan.plant_classifier import PlantClassifier
 from ecoscan.plant_server import create_app
+from ecoscan.settings import DEVELOPMENT_SECRET_KEY, Settings
 
 
 def create_png_image() -> bytes:
@@ -76,6 +79,99 @@ class PlantServerTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["service"], "EcoScan API")
         self.assertEqual(response.json()["users"], "/users/")
+
+    def test_cors_allows_only_configured_origin(self) -> None:
+        classifier = PlantClassifier(
+            Path("best.pt"),
+            model=FakeModel(),
+            metadata={},
+        )
+        settings = Settings(
+            _env_file=None,
+            CORS_ALLOWED_ORIGINS="https://app.example.com",
+        )
+        with TestClient(
+            create_app(
+                classifier,
+                initialize_database=False,
+                app_settings=settings,
+            )
+        ) as client:
+            allowed = client.options(
+                "/plants/health",
+                headers={
+                    "Origin": "https://app.example.com",
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+            denied = client.options(
+                "/plants/health",
+                headers={
+                    "Origin": "https://evil.example.com",
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+
+        self.assertEqual(
+            allowed.headers["access-control-allow-origin"],
+            "https://app.example.com",
+        )
+        self.assertNotIn("access-control-allow-origin", denied.headers)
+
+    def test_rejects_development_secrets_in_production(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            ENVIRONMENT="production",
+            PUBLIC_BASE_URL="https://api.example.com",
+            CORS_ALLOWED_ORIGINS="https://app.example.com",
+            ALLOWED_HOSTS="api.example.com",
+            SECRET_KEY=DEVELOPMENT_SECRET_KEY,
+            DATABASE_URL=(
+                "postgresql+psycopg://postgres:strong@db:5432/ecoscan"
+            ),
+        )
+
+        with self.assertRaises(ValueError):
+            settings.validate_production()
+
+    def test_uses_render_environment_defaults_in_production(self) -> None:
+        settings = Settings(
+            _env_file=None,
+            ENVIRONMENT="production",
+            RENDER_EXTERNAL_HOSTNAME="ecoscan-api.onrender.com",
+            CORS_ALLOWED_ORIGINS="",
+            SECRET_KEY="s" * 64,
+            DATABASE_URL=(
+                "postgresql://ecoscan:strong@database.internal/ecoscan"
+            ),
+        )
+
+        settings.validate_production()
+
+        self.assertEqual(
+            settings.database_url,
+            "postgresql+psycopg://ecoscan:strong@database.internal/ecoscan",
+        )
+        self.assertEqual(
+            settings.public_base_url,
+            "https://ecoscan-api.onrender.com",
+        )
+        self.assertEqual(
+            settings.allowed_hosts,
+            ["ecoscan-api.onrender.com"],
+        )
+
+    def test_alembic_accepts_percent_encoded_database_password(self) -> None:
+        database_url = (
+            "postgresql://ecoscan:pass%2Fword@database.internal/ecoscan"
+        )
+        with patch.object(database.settings, "DATABASE_URL", database_url):
+            config = database._alembic_config()
+
+        self.assertEqual(
+            config.get_main_option("sqlalchemy.url"),
+            "postgresql+psycopg://ecoscan:pass%2Fword@database.internal/ecoscan",
+        )
 
 
 class PlantServerWithoutModelTests(TestCase):

@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: ecoscan-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./api/ecoscan/Dockerfile
+    dockerContext: ./api
+    healthCheckPath: /plants/health
+    buildFilter:
+      paths:
+        - api/**
+        - render.yaml
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ecoscan-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: CORS_ALLOWED_ORIGINS
+        value: ""
+      - key: API_DOCS_ENABLED
+        value: "false"
+      - key: PASSWORD_RESET_EXPOSE_TOKEN
+        value: "false"
+      - key: IMAGE_RETENTION_DAYS
+        value: "90"
+      - key: ECOSCAN_DEVICE
+        value: cpu
+      - key: YOLO_CONFIG_DIR
+        value: /tmp/ultralytics
+      - key: ECOSCAN_MODEL_PATH
+        value: /tmp/ecoscan/best.pt
+      - key: ECOSCAN_MODEL_URL
+        sync: false
+      - key: ECOSCAN_MODEL_SHA256
+        value: d03b0dc16937052131ebb1c391d70aa873e42c11d383bb2d9e6a0bdbe61be847
+
+databases:
+  - name: ecoscan-db
+    databaseName: ecoscan
+    user: ecoscan
+    plan: free

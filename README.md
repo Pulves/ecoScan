@@ -1,6 +1,13 @@
 # EcoScan
 
-EcoScan e um aplicativo Flutter para Android criado para identificar plantas a partir da camera do dispositivo. Nesta primeira versao, o projeto entrega a estrutura visual e o fluxo principal do aplicativo, deixando a integracao real com camera e modelo de deteccao preparada para as proximas etapas.
+EcoScan e um aplicativo Flutter para Android que identifica plantas a partir
+da camera, salva historico e biblioteca e se comunica com uma API FastAPI.
+
+Documentos de publicacao:
+
+- [Guia de release](docs/RELEASE.md)
+- [Hospedagem da API no Render](docs/RENDER.md)
+- [Politica de privacidade](PRIVACY_POLICY.md)
 
 ## Telas implementadas
 
@@ -59,6 +66,15 @@ Para rodar em um celular especifico:
 flutter devices
 flutter run -d ID_DO_DISPOSITIVO
 ```
+
+Depois da primeira instalacao, o app debug funciona sem cabo USB quando o
+celular e o computador estao na mesma rede Wi-Fi. A API e descoberta
+automaticamente na porta 8000. Consulte
+[a configuracao de rede local](api/PLANT_SERVER.md#uso-sem-cabo-usb-na-rede-local).
+
+Para usar o aplicativo fora da rede local, publique a API no Render e gere o
+app com a URL HTTPS em `ECOSCAN_API_BASE_URL`. Consulte o
+[guia de hospedagem no Render](docs/RENDER.md).
 
 ## Como testar no smartphone Android
 

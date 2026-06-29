@@ -1,6 +1,44 @@
 services:
-  api:
+  caddy:
+    image: caddy:2-alpine
+    container_name: ecoscan_proxy
+    restart: always
     environment:
+      ECOSCAN_DOMAIN: ${ECOSCAN_DOMAIN:?ECOSCAN_DOMAIN obrigatorio}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL obrigatorio}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - minha_rede
+
+  api:
+    command:
+      [
+        "uvicorn",
+        "ecoscan.app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--proxy-headers",
+        "--forwarded-allow-ips=*",
+      ]
+    environment:
+      ENVIRONMENT: production
+      PUBLIC_BASE_URL: https://${ECOSCAN_DOMAIN:?ECOSCAN_DOMAIN obrigatorio}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS obrigatorio}
+      ALLOWED_HOSTS: ${ECOSCAN_DOMAIN:?ECOSCAN_DOMAIN obrigatorio},localhost
+      API_DOCS_ENABLED: "false"
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY obrigatoria}
       PASSWORD_RESET_EXPOSE_TOKEN: "false"
       SMTP_HOST: ${SMTP_HOST:?SMTP_HOST obrigatorio em producao}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -10,3 +48,7 @@ services:
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-EcoScan}
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+
+volumes:
+  caddy_data:
+  caddy_config:
