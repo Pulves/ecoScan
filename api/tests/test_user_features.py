@@ -6,7 +6,7 @@ from ecoscan.email_service import _build_password_reset_message
 from ecoscan.models import PasswordResetToken, User
 from ecoscan.routes import auth
 from ecoscan.routes.auth import confirm_password_reset, request_password_reset
-from ecoscan.routes.user import delete_user, update_user
+from ecoscan.routes.user import update_user
 from ecoscan.schemas import (
     PasswordResetRequestSchema,
     PasswordResetSchema,
@@ -20,7 +20,6 @@ class FakeSession:
     def __init__(self, scalar_results: list[object | None]) -> None:
         self.scalar_results = scalar_results
         self.added: list[object] = []
-        self.deleted: list[object] = []
 
     async def scalar(self, statement: object):
         return self.scalar_results.pop(0)
@@ -45,9 +44,6 @@ class FakeSession:
 
     async def get(self, model: type, identifier: object):
         return self.scalar_results.pop(0)
-
-    async def delete(self, value: object) -> None:
-        self.deleted.append(value)
 
 
 class UserFeatureTests(IsolatedAsyncioTestCase):
@@ -111,19 +107,6 @@ class UserFeatureTests(IsolatedAsyncioTestCase):
         self.assertEqual(result["message"], "Senha alterada com sucesso.")
         self.assertIsNotNone(stored_token.used_at)
         self.assertTrue(verify_password("new-password", user.password))
-
-    async def test_deletes_user_account(self) -> None:
-        user = User(
-            name="test-user",
-            email="user@example.com",
-            password="hashed",
-        )
-        session = FakeSession([])
-
-        result = await delete_user(session=session, current_user=user)
-
-        self.assertIsNone(result)
-        self.assertEqual(session.deleted, [user])
 
     async def test_password_reset_is_sent_by_email_in_production(self) -> None:
         user = User(

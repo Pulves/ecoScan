@@ -36,7 +36,7 @@ python -m ecoscan.plant_server
 ```
 
 O comando inicia a API unificada de usuarios, autenticacao e reconhecimento.
-O servidor escuta em todas as interfaces na porta `8000`:
+Por padrao, o servidor aceita conexoes somente em `127.0.0.1:8000`:
 
 - Documentacao interativa: `http://localhost:8000/docs`
 - Cadastro de usuario: `POST http://localhost:8000/users/`
@@ -58,16 +58,13 @@ A autenticacao retorna um access token de curta duracao e um refresh token.
 O aplicativo armazena ambos com `flutter_secure_storage` e usa
 `/auth/refresh` para renovar a sessao sem exigir um novo login.
 
-Em desenvolvimento, `PASSWORD_RESET_EXPOSE_TOKEN=true` devolve o token de
-recuperacao diretamente para o aplicativo. Em producao, o arquivo
-`docker-compose.prod.yml` fixa essa opcao como `false` e a API envia o codigo
-por SMTP. O aplicativo permite informar o codigo recebido por email junto da
-nova senha.
+No ambiente local, `PASSWORD_RESET_EXPOSE_TOKEN=true` devolve o token de
+recuperacao diretamente para o aplicativo. O app permite informar esse codigo
+junto da nova senha.
 
-Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM_EMAIL` e, quando exigidos pelo
-provedor, `SMTP_USERNAME` e `SMTP_PASSWORD`. Use `SMTP_USE_TLS=true` para
-STARTTLS (normalmente porta 587) ou `SMTP_USE_SSL=true` para TLS implicito
-(normalmente porta 465), nunca ambos.
+O envio por SMTP permanece opcional. Quando usado, configure `SMTP_HOST`,
+`SMTP_PORT`, `SMTP_FROM_EMAIL` e, quando exigidos pelo provedor,
+`SMTP_USERNAME` e `SMTP_PASSWORD`.
 
 ## Docker
 
@@ -87,7 +84,9 @@ docker compose up -d --build
 docker compose ps
 ```
 
-O Postgres fica disponivel na porta `5432` e a API na porta `8000`.
+O Postgres fica disponivel somente em `127.0.0.1:5432` e o container da API em
+`127.0.0.1:18000`. O relay USB descrito abaixo expoe a API local em
+`127.0.0.1:8000` sem abrir acesso pela rede.
 O container da API so fica saudavel quando o modelo estiver carregado.
 
 ## Migracoes do banco
@@ -228,38 +227,16 @@ Future<Map<String, dynamic>> identifyPlant(
 }
 ```
 
-No emulador Android, use `http://10.0.2.2:8000`.
-
-## Uso sem cabo USB na rede local
-
-O Compose de desenvolvimento publica a API em `0.0.0.0:8000`. O aplicativo
-debug procura automaticamente uma API EcoScan nos enderecos privados da mesma
-sub-rede Wi-Fi e reutiliza o endereco encontrado durante a sessao. Nao e
-necessario executar `adb reverse` nem manter o cabo conectado.
-
-No Windows, abra um PowerShell como Administrador uma unica vez e execute:
+O aplicativo usa somente `http://127.0.0.1:8000`. Na raiz do projeto, conecte o
+celular fisico por USB e execute:
 
 ```powershell
-cd api
-.\scripts\enable-lan-access.ps1
+.\scripts\start-local-usb.ps1
 ```
 
-A regra padrao libera TCP 8000 somente para `192.168.0.0/24`, inclusive quando
-o Wi-Fi do Windows esta marcado como publico. Informe `-RemoteAddress` se a
-rede local usar outra faixa. O computador e o celular precisam estar na mesma
-rede, sem isolamento de clientes Wi-Fi. Em producao, a descoberta LAN e
-desativada e o app exige a URL HTTPS definida por `ECOSCAN_API_BASE_URL`.
-
-Se o Docker Desktop tiver criado duas regras publicas de bloqueio para
-`com.docker.backend.exe`, elas prevalecem sobre a permissao acima. Depois de
-conferir que sao exatamente essas duas regras, desabilite somente elas com:
-
-```powershell
-.\scripts\allow-docker-lan-forwarding.ps1 -Confirm
-```
-
-O script aborta sem alteracoes se encontrar uma quantidade ou configuracao
-diferente e nao modifica a politica padrao do Firewall.
+O script valida a API em `127.0.0.1:18000`, inicia um relay restrito ao loopback
+em `127.0.0.1:8000` e configura `adb reverse tcp:8000 tcp:8000`. O cabo deve
+permanecer conectado durante o uso do aplicativo.
 
 ## Configuracao opcional
 
@@ -269,7 +246,7 @@ As seguintes variaveis de ambiente podem ser definidas antes de iniciar:
 $env:ECOSCAN_MODEL_PATH = "C:\modelos\best.pt"
 $env:ECOSCAN_METADATA_PATH = "C:\modelos\model_metadata.json"
 $env:ECOSCAN_DEVICE = "cpu"
-$env:ECOSCAN_HOST = "0.0.0.0"
+$env:ECOSCAN_HOST = "127.0.0.1"
 $env:ECOSCAN_PORT = "8000"
 $env:PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = "15"
 $env:PASSWORD_RESET_EXPOSE_TOKEN = "false"
@@ -284,25 +261,6 @@ $env:SMTP_USE_SSL = "false"
 $env:IMAGE_RETENTION_DAYS = "90"
 python -m ecoscan.plant_server
 ```
-
-Para subir a configuracao de producao:
-
-```powershell
-docker compose `
-  --env-file .env.production `
-  -f docker-compose.yml `
-  -f docker-compose.prod.yml `
-  up -d --build
-```
-
-O Caddy publica a API com HTTPS e renovacao automatica do certificado. O
-Compose interrompe a inicializacao se dominio, email ACME, segredos ou SMTP
-estiverem ausentes. Mantenha as credenciais somente em `.env.production` ou no
-gerenciador de segredos do ambiente; esse arquivo nao e versionado.
-
-Em producao, `CORS_ALLOWED_ORIGINS` aceita somente origens HTTPS explicitas e
-`ALLOWED_HOSTS` deve conter o dominio publico da API. A documentacao OpenAPI
-fica desativada por padrao.
 
 Para usar uma GPU NVIDIA configurada para o PyTorch, defina
 `ECOSCAN_DEVICE=0`.

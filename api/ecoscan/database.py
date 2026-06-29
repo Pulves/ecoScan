@@ -10,21 +10,18 @@ from ecoscan.settings import Settings
 
 
 settings = Settings()
-engine = create_async_engine(settings.database_url, future=True)
+engine = create_async_engine(settings.DATABASE_URL, future=True)
 
 
 def _alembic_config() -> Config:
     config = Config(str(Path(__file__).with_name("alembic.ini")))
-    config.set_main_option(
-        "sqlalchemy.url",
-        settings.database_url.replace("%", "%%"),
-    )
+    config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
     return config
 
 
 def _upgrade_database() -> None:
     config = _alembic_config()
-    sync_engine = create_engine(settings.database_url, future=True)
+    sync_engine = create_engine(settings.DATABASE_URL, future=True)
     try:
         with sync_engine.connect() as connection:
             tables = set(inspect(connection).get_table_names())

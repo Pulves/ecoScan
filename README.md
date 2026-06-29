@@ -1,26 +1,20 @@
 # EcoScan
 
-EcoScan e um aplicativo Flutter para Android que identifica plantas a partir
-da camera, salva historico e biblioteca e se comunica com uma API FastAPI.
-
-Documentos de publicacao:
-
-- [Guia de release](docs/RELEASE.md)
-- [Hospedagem da API no Render](docs/RENDER.md)
-- [Politica de privacidade](PRIVACY_POLICY.md)
+EcoScan e um aplicativo Flutter para Android criado para identificar plantas a partir da camera do dispositivo. Nesta primeira versao, o projeto entrega a estrutura visual e o fluxo principal do aplicativo, deixando a integracao real com camera e modelo de deteccao preparada para as proximas etapas.
 
 ## Telas implementadas
 
 - **Login**: tela inicial com logo, campos de login e senha, botao de entrada e link de recuperacao de senha.
 - **Historico**: lista de plantas ja identificadas, agrupadas por data, com cards contendo imagem ilustrativa, nome e data.
-- **Minha Biblioteca**: lista de plantas adicionadas pelo usuario, com acao visual de remocao.
+- **Meu Jardim**: lista de plantas adicionadas pelo usuario, com acao visual de remocao.
+- **Detalhes da planta**: informacoes botanicas e cuidados de cultivo para as cinco classes reconhecidas pelo modelo.
 - **Captura**: tela de captura com pre-visualizacao ilustrativa, botao de camera e resultado simulado de identificacao.
 
 ## Alteracoes realizadas
 
 - Substituicao do template inicial do contador por uma experiencia completa do EcoScan.
 - Criacao de componentes reutilizaveis para logo, campos de texto, cards de plantas, cabecalho e barra de navegacao.
-- Implementacao de navegacao inferior entre Biblioteca, Historico e Captura.
+- Implementacao de navegacao inferior entre Meu Jardim, Historico e Captura.
 - Inclusao de um fluxo simulado de deteccao: ao tocar no botao de camera, o app mostra um resultado e permite adicionar a planta ao historico e a biblioteca.
 - Atualizacao do nome Android do aplicativo para `EcoScan`.
 - Declaracao da permissao de camera no AndroidManifest para preparar a integracao futura com a camera real.
@@ -60,21 +54,40 @@ flutter pub get
 flutter run
 ```
 
+## API local pelo cabo USB
+
+A API e o PostgreSQL rodam somente no computador. Inicie os containers:
+
+```powershell
+cd api
+docker compose up -d --build
+cd ..
+```
+
+Conecte o celular por USB e crie o redirecionamento antes de iniciar o app:
+
+```powershell
+.\scripts\start-local-usb.ps1
+flutter run -d ID_DO_DISPOSITIVO
+```
+
+O container da API fica em `127.0.0.1:18000`. O script inicia um relay local em
+`127.0.0.1:8000` e ativa o `adb reverse` nessa porta. O aplicativo acessa
+exclusivamente esse endereco. Nao e necessario liberar porta no Firewall nem
+informar IP da rede Wi-Fi. Mantenha o cabo conectado enquanto usar a API.
+
+Para encerrar o relay e remover o redirecionamento:
+
+```powershell
+.\scripts\stop-local-usb.ps1
+```
+
 Para rodar em um celular especifico:
 
 ```bash
 flutter devices
 flutter run -d ID_DO_DISPOSITIVO
 ```
-
-Depois da primeira instalacao, o app debug funciona sem cabo USB quando o
-celular e o computador estao na mesma rede Wi-Fi. A API e descoberta
-automaticamente na porta 8000. Consulte
-[a configuracao de rede local](api/PLANT_SERVER.md#uso-sem-cabo-usb-na-rede-local).
-
-Para usar o aplicativo fora da rede local, publique a API no Render e gere o
-app com a URL HTTPS em `ECOSCAN_API_BASE_URL`. Consulte o
-[guia de hospedagem no Render](docs/RENDER.md).
 
 ## Como testar no smartphone Android
 

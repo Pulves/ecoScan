@@ -8,14 +8,12 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ecoscan.database import close_database, run_database_migrations
 from ecoscan.plant_classifier import PlantClassifier
 from ecoscan.routes import auth, user
 from ecoscan.routes.plants import router as plants_router
 from ecoscan.routes.records import history_router, library_router
-from ecoscan.settings import Settings
 
 
 logger = logging.getLogger(__name__)
@@ -34,11 +32,7 @@ def create_app(
     classifier: PlantClassifier | None = None,
     *,
     initialize_database: bool = True,
-    app_settings: Settings | None = None,
 ) -> FastAPI:
-    settings = app_settings or Settings()
-    settings.validate_production()
-
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if initialize_database:
@@ -71,22 +65,14 @@ def create_app(
             "de plantas com YOLO11."
         ),
         lifespan=lifespan,
-        docs_url="/docs" if settings.API_DOCS_ENABLED else None,
-        redoc_url="/redoc" if settings.API_DOCS_ENABLED else None,
-        openapi_url="/openapi.json" if settings.API_DOCS_ENABLED else None,
     )
     app.add_middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=settings.allowed_hosts,
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
-    if settings.cors_allowed_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.cors_allowed_origins,
-            allow_credentials=False,
-            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            allow_headers=["Authorization", "Content-Type"],
-        )
     app.include_router(user.router)
     app.include_router(auth.router)
     app.include_router(plants_router)
@@ -104,7 +90,7 @@ def create_app(
             "identify": "/plants/identify",
             "history": "/history",
             "library": "/library",
-            "documentation": "/docs" if settings.API_DOCS_ENABLED else None,
+            "documentation": "/docs",
         }
 
     return app
@@ -118,7 +104,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         app,
-        host=os.getenv("ECOSCAN_HOST", "0.0.0.0"),
+        host=os.getenv("ECOSCAN_HOST", "127.0.0.1"),
         port=int(os.getenv("ECOSCAN_PORT", "8000")),
         loop=event_loop_factory,
     )

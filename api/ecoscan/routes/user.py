@@ -109,12 +109,3 @@ async def update_user(
         "refresh_token": create_refresh_token({"sub": current_user.email}),
         "token_type": "bearer",
     }
-
-
-@router.delete("/", status_code=HTTPStatus.NO_CONTENT)
-async def delete_user(
-    session: Session,
-    current_user: CurrentUser,
-) -> None:
-    await session.delete(current_user)
-    await session.commit()

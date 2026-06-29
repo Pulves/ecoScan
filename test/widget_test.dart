@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:ecoscan_app/main.dart';
+import 'package:ecoscan_app/plant_catalog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -60,26 +61,21 @@ class FailingTokenStorage implements TokenStorage {
 }
 
 void main() {
-  test('Release requires an explicit HTTPS API URL', () {
+  test('Plant care catalog covers the five dataset classes', () {
     expect(
-      () =>
-          resolveApiBaseUrlCandidates(configuredBaseUrl: '', releaseMode: true),
-      throwsStateError,
+      plantCareCatalog.keys,
+      containsAll(<String>['banana', 'coconut', 'coffee', 'mango', 'tomato']),
     );
-    expect(
-      () => resolveApiBaseUrlCandidates(
-        configuredBaseUrl: 'http://api.example.com',
-        releaseMode: true,
-      ),
-      throwsStateError,
-    );
-    expect(
-      resolveApiBaseUrlCandidates(
-        configuredBaseUrl: 'https://api.example.com/',
-        releaseMode: true,
-      ),
-      ['https://api.example.com'],
-    );
+    expect(plantCareCatalog, hasLength(5));
+    for (final guide in plantCareCatalog.values) {
+      expect(guide.scientificName, isNotEmpty);
+      expect(guide.origin, isNotEmpty);
+      expect(guide.abundance, isNotEmpty);
+      expect(guide.watering, isNotEmpty);
+      expect(guide.fertilizing, isNotEmpty);
+      expect(guide.sunlight, isNotEmpty);
+    }
+    expect(plantCareGuideFor(commonName: 'Cafe')?.slug, 'coffee');
   });
 
   testWidgets('EcoScan login opens the main plant screens', (tester) async {
@@ -134,7 +130,7 @@ void main() {
 
     await tester.tap(find.byIcon(Icons.menu_book_outlined));
     await tester.pumpAndSettle();
-    expect(find.text('Minha Biblioteca'), findsOneWidget);
+    expect(find.text('Meu Jardim'), findsOneWidget);
 
     await tester.tap(find.byIcon(Icons.center_focus_strong));
     await tester.pumpAndSettle();
@@ -309,7 +305,6 @@ void main() {
             );
             return submittedProfile!;
           },
-          onDeleteAccount: () async {},
         ),
       ),
     );
@@ -321,49 +316,6 @@ void main() {
 
     expect(submittedProfile?.name, 'Nome novo');
     expect(submittedProfile?.email, 'new@example.com');
-  });
-
-  testWidgets('Settings exposes privacy and confirms account deletion', (
-    tester,
-  ) async {
-    var deleteCalls = 0;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: SettingsScreen(
-          profile: const UserProfile(
-            id: 'user-id',
-            name: 'User',
-            email: 'user@example.com',
-          ),
-          onSave: ({required name, required email}) async {
-            return UserProfile(id: 'user-id', name: name, email: email);
-          },
-          onDeleteAccount: () async => deleteCalls++,
-        ),
-      ),
-    );
-
-    await tester.tap(find.text('Politica de privacidade'));
-    await tester.pumpAndSettle();
-    expect(find.text('Politica de privacidade'), findsOneWidget);
-    expect(find.textContaining('A camera e acessada'), findsOneWidget);
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Excluir minha conta'));
-    await tester.pumpAndSettle();
-    expect(find.text('Excluir conta?'), findsOneWidget);
-    expect(deleteCalls, 0);
-
-    await tester.tap(find.text('Cancelar'));
-    await tester.pumpAndSettle();
-    expect(deleteCalls, 0);
-
-    await tester.tap(find.text('Excluir minha conta'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Excluir definitivamente'));
-    await tester.pumpAndSettle();
-    expect(deleteCalls, 1);
   });
 
   testWidgets('Deleting a record requires explicit confirmation', (
@@ -404,6 +356,57 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Remover'));
     await tester.pumpAndSettle();
     expect(deleteCalls, 1);
+  });
+
+  testWidgets('Library plant opens botanical information and care layer', (
+    tester,
+  ) async {
+    const plant = PlantEntry(
+      id: 'mango-id',
+      name: 'Mangueira',
+      slug: 'mango',
+      date: '29/06/2026',
+      subtitle: 'Confianca 93%',
+      palette: [Colors.green, Colors.lightGreen],
+      icon: Icons.local_florist,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: LibraryScreen(
+            plants: const [plant],
+            onDelete: (_) async {},
+            onRefresh: () async {},
+            onLogout: () async {},
+            onSettings: () async {},
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Mangueira'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('plant-details-sheet')), findsOneWidget);
+    expect(find.text('Mangifera indica'), findsOneWidget);
+    expect(find.text('Origem'), findsOneWidget);
+    expect(find.text('Onde e mais abundante'), findsOneWidget);
+
+    final detailsScrollable = find.descendant(
+      of: find.byKey(const Key('plant-details-sheet')),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(
+      find.text('Cuidados para cultivar'),
+      250,
+      scrollable: detailsScrollable,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Cuidados para cultivar'), findsOneWidget);
+    expect(find.text('Rega'), findsOneWidget);
+    expect(find.text('Adubacao'), findsOneWidget);
+    expect(find.text('Exposicao ao sol'), findsOneWidget);
   });
 
   test(
@@ -485,45 +488,39 @@ void main() {
     );
   });
 
-  test(
-    'EcoScanApiClient falls back from adb reverse to emulator host',
-    () async {
-      final calledHosts = <String>[];
-      final client = MockClient((request) async {
-        calledHosts.add(request.url.host);
-        if (request.url.host == '127.0.0.1') {
-          throw http.ClientException('Connection refused', request.url);
-        }
+  test('EcoScanApiClient uses the adb reverse local endpoint', () async {
+    final calledUris = <Uri>[];
+    final client = MockClient((request) async {
+      calledUris.add(request.url);
+      return http.Response(
+        jsonEncode({
+          'success': true,
+          'recognized': true,
+          'plant': {
+            'class_id': 0,
+            'slug': 'banana',
+            'name': 'Bananeira',
+            'confidence': 0.81,
+          },
+          'alternatives': [],
+          'threshold': 0.6,
+          'model': {
+            'task': 'classification',
+            'architecture': 'yolo11s-cls.pt',
+            'image_size': 224,
+          },
+        }),
+        200,
+      );
+    });
 
-        return http.Response(
-          jsonEncode({
-            'success': true,
-            'recognized': true,
-            'plant': {
-              'class_id': 0,
-              'slug': 'banana',
-              'name': 'Bananeira',
-              'confidence': 0.81,
-            },
-            'alternatives': [],
-            'threshold': 0.6,
-            'model': {
-              'task': 'classification',
-              'architecture': 'yolo11s-cls.pt',
-              'image_size': 224,
-            },
-          }),
-          200,
-        );
-      });
+    final api = EcoScanApiClient(client: client);
+    final result = await api.identifyPlant(Uint8List.fromList([1, 2, 3]));
 
-      final api = EcoScanApiClient(client: client);
-      final result = await api.identifyPlant(Uint8List.fromList([1, 2, 3]));
-
-      expect(calledHosts, ['127.0.0.1', '10.0.2.2']);
-      expect(result.plant?.name, 'Bananeira');
-    },
-  );
+    expect(calledUris, hasLength(1));
+    expect(calledUris.single.origin, 'http://127.0.0.1:8000');
+    expect(result.plant?.name, 'Bananeira');
+  });
 
   test('EcoScanApiClient persists, reloads and removes user records', () async {
     const recordId = '9473157e-99eb-4633-91d8-38f72c164268';
@@ -690,30 +687,6 @@ void main() {
     expect(profile.name, 'Nome novo');
     expect(tokenStorage.accessToken, 'new-access');
     expect(tokenStorage.refreshToken, 'new-refresh');
-  });
-
-  test('EcoScanApiClient deletes account and clears tokens', () async {
-    final tokenStorage = MemoryTokenStorage()
-      ..accessToken = 'stored-access'
-      ..refreshToken = 'stored-refresh';
-    final client = MockClient((request) async {
-      expect(request.method, 'DELETE');
-      expect(request.url.path, '/users/');
-      expect(request.headers['authorization'], 'Bearer stored-access');
-      return http.Response('', 204);
-    });
-    final api = EcoScanApiClient(
-      baseUrl: 'http://api.test',
-      client: client,
-      tokenStorage: tokenStorage,
-      accessToken: 'stored-access',
-      refreshToken: 'stored-refresh',
-    );
-
-    await api.deleteAccount();
-
-    expect(tokenStorage.accessToken, isNull);
-    expect(tokenStorage.refreshToken, isNull);
   });
 
   test('EcoScanApiClient requests and confirms password reset', () async {
