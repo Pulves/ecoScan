@@ -1,142 +1,152 @@
 # EcoScan
 
-EcoScan e um aplicativo Flutter para Android criado para identificar plantas a partir da camera do dispositivo. Nesta primeira versao, o projeto entrega a estrutura visual e o fluxo principal do aplicativo, deixando a integracao real com camera e modelo de deteccao preparada para as proximas etapas.
+EcoScan e um aplicativo Flutter para Android que identifica plantas pela camera
+do dispositivo. O app utiliza uma API FastAPI, PostgreSQL e um modelo YOLO11 de
+classificacao, alem de manter historico e jardim por usuario.
 
-## Telas implementadas
+## Funcionalidades
 
-- **Login**: tela inicial com logo, campos de login e senha, botao de entrada e link de recuperacao de senha.
-- **Historico**: lista de plantas ja identificadas, agrupadas por data, com cards contendo imagem ilustrativa, nome e data.
-- **Meu Jardim**: lista de plantas adicionadas pelo usuario, com acao visual de remocao.
-- **Detalhes da planta**: informacoes botanicas e cuidados de cultivo para as cinco classes reconhecidas pelo modelo.
-- **Captura**: tela de captura com pre-visualizacao ilustrativa, botao de camera e resultado simulado de identificacao.
+- cadastro, login, renovacao de sessao e recuperacao de senha;
+- captura de imagens com a camera do dispositivo;
+- classificacao de plantas com o modelo `best.pt`;
+- historico de identificacoes e imagens;
+- jardim pessoal com inclusao e remocao de plantas;
+- detalhes botanicos e cuidados para as classes reconhecidas;
+- edicao de perfil e exclusao de conta.
 
-## Alteracoes realizadas
+## Branch do projeto
 
-- Substituicao do template inicial do contador por uma experiencia completa do EcoScan.
-- Criacao de componentes reutilizaveis para logo, campos de texto, cards de plantas, cabecalho e barra de navegacao.
-- Implementacao de navegacao inferior entre Meu Jardim, Historico e Captura.
-- Inclusao de um fluxo simulado de deteccao: ao tocar no botao de camera, o app mostra um resultado e permite adicionar a planta ao historico e a biblioteca.
-- Atualizacao do nome Android do aplicativo para `EcoScan`.
-- Declaracao da permissao de camera no AndroidManifest para preparar a integracao futura com a camera real.
-- Atualizacao do teste de widget para validar o fluxo principal entre as telas.
+O estado atual do aplicativo esta na branch `front_app`. Ela nao e a branch
+padrao do repositorio. Depois de clonar, selecione-a explicitamente:
 
-## Estrutura principal
-
-```text
-lib/
-  main.dart                  # Telas, componentes e navegacao do app
-
-test/
-  widget_test.dart            # Teste basico do fluxo de telas
-
-android/app/src/main/
-  AndroidManifest.xml         # Nome do app e permissao de camera
+```powershell
+git clone https://github.com/Pulves/ecoScan.git
+cd ecoScan
+git checkout front_app
 ```
 
 ## Requisitos
 
-- Flutter SDK instalado e configurado no PATH.
-- Android Studio instalado.
-- Um emulador Android ou smartphone Android com depuracao USB ativada.
+- Git;
+- Flutter SDK compativel com Dart `^3.12.0`;
+- Android Studio e Android SDK, incluindo `adb`;
+- Docker Desktop com Docker Compose;
+- Node.js disponivel no `PATH`;
+- PowerShell;
+- smartphone Android com depuracao USB ativada.
 
-Verifique o ambiente com:
+Confirme o ambiente Flutter com:
 
-```bash
+```powershell
 flutter doctor
 ```
 
-## Como executar
+## Configuracao local
+
+Crie o arquivo local de configuracao da API:
+
+```powershell
+Copy-Item api\.env.example api\.env
+```
+
+Edite `api/.env` e substitua, no minimo, `POSTGRES_PASSWORD` e `SECRET_KEY` por
+valores locais longos e aleatorios. O modelo treinado ja esta versionado em
+`api/ecoscan/best.pt`, e o exemplo aponta para ele com:
+
+```text
+ECOSCAN_MODEL_HOST_PATH=./ecoscan/best.pt
+```
+
+Em desenvolvimento, `PASSWORD_RESET_EXPOSE_TOKEN=true` devolve o codigo de
+recuperacao no proprio app. Para envio por email, defina essa opcao como `false`
+e configure as variaveis SMTP.
+
+## Iniciar API e banco
 
 Na raiz do projeto:
 
-```bash
-flutter pub get
-flutter run
-```
-
-## API local pelo cabo USB
-
-A API e o PostgreSQL rodam somente no computador. Inicie os containers:
-
 ```powershell
-cd api
+Set-Location api
 docker compose up -d --build
-cd ..
+Set-Location ..
 ```
 
-Conecte o celular por USB e crie o redirecionamento antes de iniciar o app:
+O PostgreSQL fica restrito a `127.0.0.1:5432`, e a API Docker responde em
+`127.0.0.1:18000`. Verifique o estado dos containers com:
 
 ```powershell
+Set-Location api
+docker compose ps
+Set-Location ..
+```
+
+## Executar no Android por USB
+
+Conecte o celular, autorize a depuracao USB e confirme que ele aparece em:
+
+```powershell
+adb devices
+```
+
+Prepare as dependencias Flutter, inicie o relay local e execute o aplicativo:
+
+```powershell
+flutter pub get
 .\scripts\start-local-usb.ps1
 flutter run -d ID_DO_DISPOSITIVO
 ```
 
-O container da API fica em `127.0.0.1:18000`. O script inicia um relay local em
-`127.0.0.1:8000` e ativa o `adb reverse` nessa porta. O aplicativo acessa
-exclusivamente esse endereco. Nao e necessario liberar porta no Firewall nem
-informar IP da rede Wi-Fi. Mantenha o cabo conectado enquanto usar a API.
+O script encaminha `127.0.0.1:8000` para a API Docker em
+`127.0.0.1:18000` e cria a regra `adb reverse`. O cabo USB deve permanecer
+conectado durante o uso.
 
-Para encerrar o relay e remover o redirecionamento:
+Caso mais de um dispositivo esteja conectado, informe o identificador:
+
+```powershell
+.\scripts\start-local-usb.ps1 -DeviceId ID_DO_DISPOSITIVO
+```
+
+Para remover o redirecionamento e encerrar o relay:
 
 ```powershell
 .\scripts\stop-local-usb.ps1
 ```
 
-Para rodar em um celular especifico:
+Para encerrar a API e o banco:
 
-```bash
-flutter devices
-flutter run -d ID_DO_DISPOSITIVO
+```powershell
+Set-Location api
+docker compose down
+Set-Location ..
 ```
 
-## Como testar no smartphone Android
+## Validacao
 
-1. Ative as opcoes de desenvolvedor no Android.
-2. Ative a opcao **Depuracao USB**.
-3. Conecte o smartphone ao computador via USB.
-4. Aceite a autorizacao de depuracao exibida no celular.
-5. Execute `flutter devices` para confirmar se o aparelho foi reconhecido.
-6. Execute `flutter run` para instalar e abrir o app.
+Execute as verificacoes Flutter:
 
-Tambem e possivel abrir o projeto no Android Studio, selecionar o dispositivo conectado e clicar em **Run**.
-
-## Comandos de validacao
-
-Antes de publicar no GitHub, rode:
-
-```bash
-dart format lib/main.dart test/widget_test.dart
+```powershell
+dart format --output=none --set-exit-if-changed lib test
 flutter analyze
 flutter test
 ```
 
-## Como subir para o GitHub
+Os testes da API exigem um ambiente Python com as dependencias de
+`api/ecoscan/requirements.txt` e `pytest`:
 
-Caso o projeto ainda nao esteja versionado:
-
-```bash
-git init
-git add .
-git commit -m "Implementa telas iniciais do EcoScan"
-git branch -M main
-git remote add origin https://github.com/SEU_USUARIO/ecoscan_app.git
-git push -u origin main
+```powershell
+python -m pytest api\tests -q
 ```
 
-Se o repositorio ja existir localmente:
+## Estrutura principal
 
-```bash
-git status
-git add README.md lib/main.dart test/widget_test.dart android/app/src/main/AndroidManifest.xml
-git commit -m "Documenta e implementa telas iniciais do EcoScan"
-git push
+```text
+lib/                         Aplicativo Flutter
+api/ecoscan/                 API, modelo e migracoes
+api/tests/                   Testes da API
+scripts/                     Relay local e automacao ADB
+machine_learning/            Treinamento e documentacao do modelo
+test/                        Testes Flutter
 ```
 
-## Proximos passos
-
-- Integrar camera real usando um pacote como `camera`.
-- Implementar permissao de camera em tempo de execucao.
-- Conectar um modelo de reconhecimento de plantas, por exemplo TensorFlow Lite.
-- Persistir historico e biblioteca em armazenamento local ou banco de dados.
-- Criar autenticacao real para login.
-- Adicionar imagens reais ou assets proprios para as plantas.
+O arquivo `api/.env`, bancos locais, builds, ambientes virtuais e demais
+segredos nao devem ser enviados ao Git.

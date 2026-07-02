@@ -4,18 +4,57 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path $PSScriptRoot -Parent
-$adb = Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"
-$node = "C:\Program Files\nodejs\node.exe"
 $proxyScript = Join-Path $PSScriptRoot "local_usb_proxy.js"
 $buildDirectory = Join-Path $projectRoot "build"
 $pidFile = Join-Path $buildDirectory "local-usb-proxy.pid"
 $stdoutLog = Join-Path $buildDirectory "local-usb-proxy.log"
 $stderrLog = Join-Path $buildDirectory "local-usb-proxy-error.log"
 
-foreach ($requiredFile in @($adb, $node, $proxyScript)) {
-    if (-not (Test-Path -LiteralPath $requiredFile)) {
-        throw "Arquivo obrigatorio nao encontrado: $requiredFile"
+function Resolve-CommandPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $command = Get-Command $Name -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $command) {
+        return $command.Source
     }
+
+    return $null
+}
+
+function Resolve-AdbPath {
+    $pathCommand = Resolve-CommandPath "adb"
+    if ($null -ne $pathCommand) {
+        return $pathCommand
+    }
+
+    $sdkRoots = @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME)
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $sdkRoots += Join-Path $env:LOCALAPPDATA "Android\Sdk"
+    }
+    foreach ($sdkRoot in $sdkRoots) {
+        if ([string]::IsNullOrWhiteSpace($sdkRoot)) {
+            continue
+        }
+        $candidate = Join-Path $sdkRoot "platform-tools\adb.exe"
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    throw "adb nao encontrado. Adicione platform-tools ao PATH ou configure ANDROID_SDK_ROOT."
+}
+
+$adb = Resolve-AdbPath
+$node = Resolve-CommandPath "node"
+if ($null -eq $node) {
+    throw "Node.js nao encontrado. Instale o Node.js e adicione node ao PATH."
+}
+if (-not (Test-Path -LiteralPath $proxyScript)) {
+    throw "Arquivo obrigatorio nao encontrado: $proxyScript"
 }
 
 try {
